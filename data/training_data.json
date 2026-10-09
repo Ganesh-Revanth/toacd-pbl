@@ -537816,5 +537816,59 @@
     "explanation": "What happened:\n The compiler expected a '}' (at end of input).\n\nWhy it happened:\n C++ has strict syntax rules. A missing semicolon, bracket, or parenthesis causes the parser to lose track of where one statement ends and another begins.\n\nHow to fix it:\n Check the line reported and the line just before it. Look for a missing ';', unmatched '(' or '{', or a stray character.",
     "suggestion": "Fix the syntax error near the reported location.",
     "confidence": 0.9577881894242243
+  },
+  {
+    "message": "identifier is not a member of identifier",
+    "raw_message": "'unique_ptr' is not a member of 'std'",
+    "category": "name_resolution",
+    "ast_node": null,
+    "explanation": "What happened:\n 'unique_ptr' is not a member of 'std'.\n\nWhy it happened:\n In C++, every variable, function, or class must be declared before it is used. It may also be in a different scope or namespace.\n\nHow to fix it:\n Declare the variable before using it, check your spelling, or add the missing #include or 'using namespace std;'.",
+    "suggestion": "Declare the identifier before use or add the missing #include.",
+    "confidence": 0.9130775586192058
+  },
+  {
+    "message": "expected primary-expression before type",
+    "raw_message": "expected primary-expression before 'int'",
+    "category": "syntax_error",
+    "ast_node": null,
+    "explanation": "What happened:\n Expected primary-expression before 'int'.\n\nWhy it happened:\n C++ has strict syntax rules. A missing semicolon, bracket, or parenthesis causes the parser to lose track of where one statement ends and another begins.\n\nHow to fix it:\n Check the line reported and the line just before it. Look for a missing ';', unmatched '(' or '{', or a stray character.",
+    "suggestion": "Fix the syntax error near the reported location.",
+    "confidence": 0.9956008110093222
+  },
+  {
+    "message": "expected primary-expression before identifier",
+    "raw_message": "expected primary-expression before 'const'",
+    "category": "syntax_error",
+    "ast_node": null,
+    "explanation": "What happened:\n Expected primary-expression before 'const'.\n\nWhy it happened:\n C++ has strict syntax rules. A missing semicolon, bracket, or parenthesis causes the parser to lose track of where one statement ends and another begins.\n\nHow to fix it:\n Check the line reported and the line just before it. Look for a missing ';', unmatched '(' or '{', or a stray character.",
+    "suggestion": "Fix the syntax error near the reported location.",
+    "confidence": 0.9951308095923567
+  },
+  {
+    "message": "expected nested-name-specifier before identifier",
+    "raw_message": "expected nested-name-specifier before 'namepsace'",
+    "category": "syntax_error",
+    "ast_node": null,
+    "explanation": "What happened:\n Expected nested-name-specifier before 'namepsace'.\n\nWhy it happened:\n C++ has strict syntax rules. A missing semicolon, bracket, or parenthesis causes the parser to lose track of where one statement ends and another begins.\n\nHow to fix it:\n Check the line reported and the line just before it. Look for a missing ';', unmatched '(' or '{', or a stray character.",
+    "suggestion": "Fix the syntax error near the reported location.",
+    "confidence": 0.9943593707110342
+  },
+  {
+    "message": "identifier was not declared in this scope; did you mean 'std::cout'?",
+    "raw_message": "'cout' was not declared in this scope; did you mean 'std::cout'?",
+    "category": "missing_include",
+    "ast_node": null,
+    "explanation": "What happened:\n The identifier 'cout' is unavailable because the <iostream> header has not been included.\n\nWhy it happened:\n The function or class you are using is defined in a header file that has not been included in your source file.\n\nHow to fix it:\n Add the appropriate #include at the top of your file. For standard library features use angle brackets e.g. #include <iostream>.",
+    "suggestion": "Add '#include <iostream>' at the top of your file",
+    "confidence": 1.0
+  },
+  {
+    "message": "expected statement terminator before identifier",
+    "raw_message": "expected ';' before 'process_user_input'",
+    "category": "syntax_error",
+    "ast_node": null,
+    "explanation": "What happened:\n The compiler expected a ';' before 'process_user_input'.\n\nWhy it happened:\n C++ has strict syntax rules. A missing semicolon, bracket, or parenthesis causes the parser to lose track of where one statement ends and another begins.\n\nHow to fix it:\n Check the line reported and the line just before it. Look for a missing ';', unmatched '(' or '{', or a stray character.",
+    "suggestion": "Fix the syntax error near the reported location.",
+    "confidence": 0.995787776841965
   }
 ]

@@ -263,17 +263,28 @@ def _string_literal_value(text: str) -> Optional[str]:
     return match.group(1)
 
 
-def _diagnostic_findings(error: CompilerError) -> list[SecurityFinding]:
-    message = (error.message or "").lower()
+def _diagnostic_findings(error: CompilerError | dict) -> list[SecurityFinding]:
+    if isinstance(error, dict):
+        raw_msg = error.get("message", "")
+        file_path = error.get("file", "")
+        line_no = error.get("line")
+        col_no = error.get("column")
+    else:
+        raw_msg = error.message or ""
+        file_path = error.file or ""
+        line_no = error.line
+        col_no = error.column
+
+    message = (raw_msg or "").lower()
     findings: list[SecurityFinding] = []
 
     for pattern, severity, vuln_type, description, recommendation in _DIAGNOSTIC_RULES:
         if pattern.search(message):
             findings.append(
                 _make_finding(
-                    error.file or "",
-                    error.line,
-                    error.column,
+                    file_path,
+                    line_no,
+                    col_no,
                     severity,  # type: ignore[arg-type]
                     vuln_type,
                     description,
@@ -309,7 +320,7 @@ def _scan_source_findings(source_path: str) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     state: dict[str, object] = {"in_block_comment": False, "raw_delim": None}
     scope_stack: list[dict[str, object]] = [
-        {"start_line": 1, "malloc_lines": [], "free_seen": False}
+        {"start_line": 1, "malloc_lines": [], "free_seen": False, "overflow_check_seen": False}
     ]
     recent_sensitive_lines: list[int] = []
     freed_vars: dict[str, int] = {}
@@ -453,16 +464,27 @@ def _scan_source_findings(source_path: str) -> list[SecurityFinding]:
                 "Prefer indexing with explicit bounds checks or use standard container iterators.",
             )
 
-        if re.search(r"\b(?:[A-Za-z_]\w*\s*[\+\-\*/]\s*[A-Za-z_0-9()]+)\b", code_line) and (
-            "INT_MAX" in code_line or "SIZE_MAX" in code_line or "sizeof" in code_line or re.search(r"\b(?:alloc|size|len|count|capacity)\b", code_line)
-        ):
-            emit(
-                line_no,
-                "Integer Overflow",
-                "High",
-                "Arithmetic on size-like values may overflow before allocation or indexing.",
-                "Validate operands before arithmetic and use checked addition/multiplication for allocation sizes.",
-            )
+        is_guard_or_condition = bool(
+            re.search(r"^\s*(?:if|while)\s*\(", code_line)
+            or re.search(r"[<>!=]=", code_line)
+            or re.search(r"[<>]", code_line)
+        )
+        if not is_guard_or_condition:
+            if re.search(r"\b(?:[A-Za-z_]\w*\s*[\+\-\*/]\s*[A-Za-z_0-9()]+)\b", code_line) and (
+                "INT_MAX" in code_line or "SIZE_MAX" in code_line or re.search(r"\b(?:alloc|size|len|count|capacity)\b", code_line)
+            ) and "sizeof" not in code_line:
+                if not any(bool(s.get("overflow_check_seen")) for s in scope_stack[1:]):
+                    emit(
+                        line_no,
+                        "Integer Overflow",
+                        "High",
+                        "Arithmetic on size-like values may overflow before allocation or indexing.",
+                        "Validate operands before arithmetic and use checked addition/multiplication for allocation sizes.",
+                    )
+        else:
+            if any(k in code_line for k in ("INT_MAX", "SIZE_MAX", "overflow")) or re.search(r"\b(?:alloc|size|len|count|capacity)\b", code_line):
+                for s in scope_stack[1:]:
+                    s["overflow_check_seen"] = True
 
         if "malloc(" in code_line:
             current_scope()["malloc_lines"].append(line_no)
@@ -496,11 +518,13 @@ def _scan_source_findings(source_path: str) -> list[SecurityFinding]:
         open_braces = code_line.count("{")
         close_braces = code_line.count("}")
         for _ in range(open_braces):
-            scope_stack.append({"start_line": line_no, "malloc_lines": [], "free_seen": False})
+            scope_stack.append({"start_line": line_no, "malloc_lines": [], "free_seen": False, "overflow_check_seen": False})
         for _ in range(close_braces):
             if len(scope_stack) <= 1:
                 continue
             finished = scope_stack.pop()
+            if len(scope_stack) == 1:
+                freed_vars.clear()
             if finished["malloc_lines"] and not finished["free_seen"]:
                 for malloc_line in finished["malloc_lines"]:
                     emit(

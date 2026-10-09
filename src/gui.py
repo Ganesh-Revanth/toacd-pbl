@@ -1,5 +1,14 @@
 import sys
 import os
+
+# Ensure src directory is in sys.path for IDE language servers & runtime
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+_ROOT_DIR = os.path.dirname(_SRC_DIR)
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
 import subprocess
 import json
 import re
@@ -7,18 +16,23 @@ import html
 import time
 import math
 import random
+import shutil
+import csv
+import platform
+import socket
+import tempfile
+
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QSplitter, QPlainTextEdit, QTextEdit,
                              QPushButton, QFileDialog, QMessageBox, QLabel, QFrame,
                              QCheckBox, QDialog, QTreeWidget, QTreeWidgetItem, QLineEdit,
                              QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QScrollArea, QSizePolicy, QTextBrowser,
-                             QProgressBar, QStyleFactory,
+                             QProgressBar, QStyleFactory, QGroupBox, QRadioButton,
                              QStackedWidget, QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsLineItem, QGraphicsTextItem, QGraphicsItem)
-from PyQt6.QtCore import Qt, QRect, QSize, QThread, pyqtSignal, QTimer, QVariantAnimation, QProcess, QPropertyAnimation, QRectF, QPointF, QEasingCurve
+from PyQt6.QtCore import Qt, QRect, QSize, QThread, pyqtSignal, QTimer, QVariantAnimation, QProcess, QProcessEnvironment, QPropertyAnimation, QRectF, QPointF, QEasingCurve
 from PyQt6.QtGui import QFont, QColor, QPainter, QTextFormat, QTextCharFormat, QSyntaxHighlighter, QTextCursor, QPainterPath, QPen, QLinearGradient, QBrush
-import platform
-import socket
-import tempfile
+
+from compiler_runner import get_compiler_cmd_and_env, _sanitize_code
 try:
     from codecarbon import EmissionsTracker
     CODECARBON_AVAILABLE = True
@@ -29,6 +43,13 @@ try:
     HEALER_AVAILABLE = True
 except ImportError:
     HEALER_AVAILABLE = False
+
+try:
+    from agentic_worker import AgenticWorker
+    from agentic_compiler import get_stored_api_key, store_api_key, get_ai_config, save_ai_config
+    AGENTIC_AVAILABLE = True
+except ImportError:
+    AGENTIC_AVAILABLE = False
 
 try:
     from error_classifier import ErrorClassifier
@@ -50,6 +71,7 @@ ERROR_LINE_COLOR = "#fefafb"
 RED = "#d12441"
 YELLOW = "#ffcc00"
 GREEN = "#24b47e"
+ACCENT_COLOR = PINK
 
 FONT_FAMILY = "Menlo" if platform.system() == "Darwin" else "Consolas"
 
@@ -1207,6 +1229,75 @@ class UserGuidanceDialog(QDialog):
         return self._hint
 
 
+class ApiKeyDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Google AI Studio Settings")
+        self.setFixedWidth(500)
+        self.setStyleSheet(f"background-color: {PANE_BG}; color: {TEXT_MAIN}; font-family: {FONT_FAMILY};")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setSpacing(14)
+
+        title = QLabel("🤖 Google AI Studio (Gemini) Configuration")
+        title.setFont(QFont(FONT_FAMILY, 12, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {PINK};")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            "Powered by <b>Google AI Studio (Gemini)</b> with high token capacity (1,000,000 TPM Free Tier).<br>"
+            "Get your free API key at <a href='https://aistudio.google.com/apikey' style='color:#5469d4;'>aistudio.google.com/apikey</a> (no credit card required)."
+        )
+        desc.setWordWrap(True)
+        desc.setOpenExternalLinks(True)
+        desc.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; padding: 4px;")
+        layout.addWidget(desc)
+
+        self.key_input = QLineEdit()
+        self.key_input.setPlaceholderText("AIzaSy...")
+        self.key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        stored_key = get_stored_api_key() if "get_stored_api_key" in globals() else ""
+        if stored_key:
+            self.key_input.setText(stored_key)
+        self.key_input.setStyleSheet(f"""
+            QLineEdit {{
+                border: 1px solid {BORDER_COLOR};
+                border-radius: 6px;
+                padding: 8px;
+                background-color: {BG_COLOR};
+                color: {TEXT_MAIN};
+                font-size: 12px;
+            }}
+            QLineEdit:focus {{
+                border-color: {PINK};
+            }}
+        """)
+        layout.addWidget(self.key_input)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        btn_cancel = StyledButton("Cancel", "outline_dim")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_save = StyledButton("Save Key", "solid_pink")
+        btn_save.clicked.connect(self._save_and_close)
+        btn_row.addWidget(btn_save)
+
+        layout.addLayout(btn_row)
+
+    def _save_and_close(self):
+        val = self.key_input.text().strip()
+        if val:
+            if "store_api_key" in globals():
+                store_api_key(val)
+            self.accept()
+        else:
+            QMessageBox.warning(self, "API Key", "Please enter a valid Google AI Studio API key.")
+
+
 class SidebarButton(QPushButton):
     def __init__(self, icon_char, label_text, tooltip_text, parent=None):
         super().__init__(parent)
@@ -1544,7 +1635,6 @@ class EnergyPage(CustomFrame):
         
         save_path, _ = QFileDialog.getSaveFileName(self, "Save CSV Report", "codecarbon_emissions.csv", "CSV Files (*.csv)")
         if save_path:
-            import shutil
             try:
                 shutil.copy2(self.csv_path, save_path)
             except Exception as e:
@@ -1554,7 +1644,6 @@ class EnergyPage(CustomFrame):
         if not os.path.exists(self.csv_path):
             return
         try:
-            import csv
             with open(self.csv_path, "r", encoding="utf-8") as f:
                 rows = list(csv.DictReader(f))
             if not rows:
@@ -2287,8 +2376,18 @@ class AppGUI(QMainWindow):
 
         self.btn_heal = StyledButton("⚕ AUTO-HEAL", "outline_dim")
         self.btn_heal.clicked.connect(self.start_heal)
-        self.btn_heal.setToolTip("Auto-detect + fix errors (up to 3 attempts)")
+        self.btn_heal.setToolTip("Auto-detect + fix errors with fast Tier 1 heuristics")
         toolbar_layout.addWidget(self.btn_heal)
+
+        self.btn_agentic = StyledButton("🤖 AGENTIC HEAL", "solid_pink")
+        self.btn_agentic.clicked.connect(self.start_agentic_heal)
+        self.btn_agentic.setToolTip("Autonomous Multi-Objective AI Agent (ReAct: Reason + Act + Security + Compile)")
+        toolbar_layout.addWidget(self.btn_agentic)
+
+        btn_key = StyledButton("⚙️ AI STUDIO", "outline_dim")
+        btn_key.clicked.connect(self.open_api_key_dialog)
+        btn_key.setToolTip("Configure Google AI Studio (Gemini) API Key")
+        toolbar_layout.addWidget(btn_key)
 
 
         self.cb_output_toggle = StyledCheckBox("Compile Output")
@@ -2707,6 +2806,217 @@ class AppGUI(QMainWindow):
                 self.heal_worker.start()
         # SKIP THIS ERROR — do nothing (fall through)
 
+    def open_api_key_dialog(self):
+        dlg = ApiKeyDialog(self)
+        dlg.exec()
+
+    def start_agentic_heal(self):
+        """Launch the autonomous Agentic AI Compiler loop."""
+        if not AGENTIC_AVAILABLE:
+            QMessageBox.warning(self, "Agentic AI", "agentic_worker.py or dependencies not available.")
+            return
+
+        api_key = get_stored_api_key()
+        if not api_key:
+            dlg = ApiKeyDialog(self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            api_key = get_stored_api_key()
+            if not api_key:
+                return
+
+        if not self.save_file():
+            return
+
+        # Clear error cards layout
+        for i in reversed(range(self.error_cards_layout.count())):
+            w = self.error_cards_layout.itemAt(i).widget()
+            if w:
+                w.setParent(None)
+
+        self.editor.clear_fixed_lines()
+
+        header_card = QFrame()
+        header_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {HEADER_BG};
+                border: 1px solid {PINK};
+                border-radius: 6px;
+                padding: 10px;
+            }}
+        """)
+        h_layout = QVBoxLayout(header_card)
+        h_layout.setContentsMargins(8, 8, 8, 8)
+        lbl_h = QLabel("🤖 <b>AGENTIC COMPILER CO-PILOT ACTIVE</b>")
+        lbl_h.setStyleSheet(f"color: {PINK}; font-size: 13px; font-family: {FONT_FAMILY};")
+        lbl_desc = QLabel("Backend: Google AI Studio (Gemini) | Autonomous ReAct Loop + AAI Guardrail Verification...")
+        lbl_desc.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
+        h_layout.addWidget(lbl_h)
+        h_layout.addWidget(lbl_desc)
+        self.error_cards_layout.addWidget(header_card)
+
+        self.btn_agentic.setEnabled(False)
+        self.status_label.setText("STATUS: ● AGENT REASONING 🧠...")
+
+        source_code = self.editor.toPlainText()
+        self.agent_worker = AgenticWorker(source_code, self.file_path, api_key=api_key)
+        self.agent_worker.step_progress.connect(self._on_agent_step)
+        self.agent_worker.heal_success.connect(self._on_agent_success)
+        self.agent_worker.heal_failed.connect(self._on_agent_failed)
+        self.agent_worker.error_signal.connect(self._on_agent_error)
+        self.agent_worker.start()
+
+    def _on_agent_step(self, step: int, thought: str, action: str, meta: dict):
+        if action in ("attack_blocked", "trojan_blocked"):
+            card = QFrame()
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background-color: #fff1f2;
+                    border: 1px solid #fecdd3;
+                    border-left: 4px solid {RED};
+                    border-radius: 6px;
+                }}
+            """)
+            c_layout = QVBoxLayout(card)
+            c_layout.setContentsMargins(12, 10, 12, 10)
+            c_layout.setSpacing(6)
+
+            hdr = QLabel("🛡️ <b>AAI GUARDRAIL INTERCEPTED ADVERSARIAL ATTACK!</b>")
+            hdr.setStyleSheet(f"color: {RED}; font-size: 12px; font-weight: bold;")
+            c_layout.addWidget(hdr)
+
+            body = QLabel(thought)
+            body.setWordWrap(True)
+            body.setStyleSheet(f"color: #9f1239; font-size: 11px;")
+            c_layout.addWidget(body)
+
+            badge = QLabel("STATUS: ATTACK BLOCKED & AUDIT LOGGED 🔒")
+            badge.setStyleSheet(f"color: white; background-color: {RED}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold;")
+            c_layout.addWidget(badge)
+
+            self.error_cards_layout.addWidget(card)
+            return
+
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {PANE_BG};
+                border: 1px solid {BORDER_COLOR};
+                border-left: 4px solid {PINK};
+                border-radius: 6px;
+            }}
+        """)
+        c_layout = QVBoxLayout(card)
+        c_layout.setContentsMargins(12, 10, 12, 10)
+        c_layout.setSpacing(6)
+
+        hdr = QLabel(f"🧠 <b>Agent Turn {step} :: Reasoning & Plan</b>")
+        hdr.setStyleSheet(f"color: {PINK}; font-size: 12px; font-weight: bold;")
+        c_layout.addWidget(hdr)
+
+        body = QLabel(thought)
+        body.setWordWrap(True)
+        body.setStyleSheet(f"color: {TEXT_MAIN}; font-size: 11px;")
+        c_layout.addWidget(body)
+
+        badges_row = QHBoxLayout()
+        badges_row.setSpacing(8)
+
+        if meta.get("provider"):
+            prov_txt = f"Provider: {meta['provider'].upper()}"
+            lbl_p = QLabel(prov_txt)
+            lbl_p.setStyleSheet(f"color: white; background-color: {ACCENT_COLOR}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold;")
+            badges_row.addWidget(lbl_p)
+
+        if meta.get("compile"):
+            comp_ok = meta["compile"].get("success", False)
+            err_cnt = meta["compile"].get("error_count", 0)
+            comp_color = GREEN if comp_ok else RED
+            comp_txt = "GCC: CLEAN ✅" if comp_ok else f"GCC: {err_cnt} error(s)"
+            lbl_c = QLabel(comp_txt)
+            lbl_c.setStyleSheet(f"color: white; background-color: {comp_color}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold;")
+            badges_row.addWidget(lbl_c)
+
+        if meta.get("security"):
+            sec_ok = meta["security"].get("is_secure", False)
+            sec_risk = meta["security"].get("risk_score", 0)
+            sec_color = GREEN if sec_ok else (YELLOW if sec_risk <= 10 else RED)
+            sec_txt = f"Security: Score {sec_risk} ({meta['security'].get('risk_level', 'Clean')})"
+            lbl_s = QLabel(sec_txt)
+            lbl_s.setStyleSheet(f"color: white; background-color: {sec_color}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold;")
+            badges_row.addWidget(lbl_s)
+
+        badges_row.addStretch()
+        c_layout.addLayout(badges_row)
+
+        self.error_cards_layout.addWidget(card)
+
+    def _on_agent_success(self, final_code: str, diff_html: str, iterations: int):
+        self.btn_agentic.setEnabled(True)
+        self.status_label.setText("STATUS: ● AGENT HEALED ✅")
+
+        try:
+            self.editor.blockSignals(True)
+            self.editor.setPlainText(final_code)
+            self.editor.blockSignals(False)
+            if self.file_path:
+                with open(self.file_path, "w", encoding="utf-8") as f:
+                    f.write(final_code)
+        except Exception:
+            self.editor.blockSignals(False)
+
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background-color: #f0fdf4;
+                border: 1px solid #bbf7d0;
+                border-left: 4px solid {GREEN};
+                border-radius: 6px;
+            }}
+        """)
+        c_layout = QVBoxLayout(card)
+        c_layout.setContentsMargins(12, 10, 12, 10)
+        c_layout.setSpacing(6)
+
+        hdr = QLabel(f"✅ <b>Agent Verified Clean & Secure!</b> ({iterations} turn(s))")
+        hdr.setStyleSheet(f"color: {GREEN}; font-size: 12px; font-weight: bold;")
+        c_layout.addWidget(hdr)
+
+        desc = QLabel("Code passes full GCC compilation check and static security audit with 0 vulnerabilities.")
+        desc.setStyleSheet(f"color: {TEXT_MAIN}; font-size: 11px;")
+        desc.setWordWrap(True)
+        c_layout.addWidget(desc)
+
+        self.error_cards_layout.addWidget(card)
+
+        if diff_html:
+            title = QLabel("<b>Agent Code Changes (Diff):</b>")
+            title.setStyleSheet(f"color: {TEXT_DIM}; font-size: 10px; font-family: {FONT_FAMILY};")
+            self.error_cards_layout.addWidget(title)
+
+            diff_box = QTextBrowser()
+            diff_box.setOpenLinks(False)
+            diff_box.setHtml(diff_html)
+            diff_box.setMaximumHeight(200)
+            diff_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            self.error_cards_layout.addWidget(diff_box)
+
+    def _on_agent_failed(self, summary: str, history: list):
+        self.btn_agentic.setEnabled(True)
+        self.status_label.setText("STATUS: ● AGENT COULD NOT RESOLVE")
+        lbl = QLabel(f"⚠️ {summary}")
+        lbl.setStyleSheet(f"color: {RED}; font-size: 11px; font-family: {FONT_FAMILY};")
+        lbl.setWordWrap(True)
+        self.error_cards_layout.addWidget(lbl)
+
+    def _on_agent_error(self, err_msg: str):
+        self.btn_agentic.setEnabled(True)
+        self.status_label.setText("STATUS: ● AGENT ERROR")
+        lbl = QLabel(f"⚠️ Agent Error: {err_msg}")
+        lbl.setStyleSheet(f"color: {RED}; font-size: 11px; font-family: {FONT_FAMILY};")
+        lbl.setWordWrap(True)
+        self.error_cards_layout.addWidget(lbl)
+
     def _record_execution(self):
         self.execution_count += 1
         if hasattr(self, 'sparkline'):
@@ -2892,36 +3202,94 @@ class AppGUI(QMainWindow):
         self.pane_right_bottom.setVisible(should_show)
 
     def run_code(self):
-        binary = "./a.exe" if os.path.exists("./a.exe") else ("./a.out" if os.path.exists("./a.out") else None)
-        if not binary:
-             self.terminal.append_output(f"<span style='color:{PINK}'>Compiled binary ('a.exe' / 'a.out') not found. Please compile first.</span>", is_html=True)
-             return
-             
+        # 1. Save latest code first
+        if not self.save_file():
+            self.terminal.append_output(f"<div style='color:{RED};'>ERROR: Could not save file before compiling.</div>", is_html=True)
+            return
+
+        # 2. Terminate any previous running process before re-compiling
+        if hasattr(self, 'process') and self.process and self.process.state() == QProcess.ProcessState.Running:
+            self.process.kill()
+            self.process.waitForFinished(1000)
+
+        # 3. Ensure runner console is visible & expanded
+        self.pane_right_bottom.setVisible(True)
+        if hasattr(self, 'cb_output_toggle'):
+            self.cb_output_toggle.setChecked(True)
         self.terminal.clear()
         self.editor.clear_fixed_lines()
         self._record_execution()
+
+        # 4. Compile freshly before execution
+        compiler_bin, env = get_compiler_cmd_and_env()
+        
+        binary_name = "a.exe" if (sys.platform == "win32" or os.name == "nt") else "a.out"
+        binary_path = os.path.abspath(binary_name)
+
+        # File-lock safeguard: try removing stale binary or fallback to a_run.exe
+        if os.path.exists(binary_path):
+            try:
+                os.remove(binary_path)
+            except OSError:
+                binary_name = "a_run.exe" if (sys.platform == "win32" or os.name == "nt") else "a_run.out"
+                binary_path = os.path.abspath(binary_name)
+                if os.path.exists(binary_path):
+                    try:
+                        os.remove(binary_path)
+                    except OSError:
+                        pass
+
+        self.terminal.append_output(f"<div style='color:{TEXT_DIM}; font-family:{FONT_FAMILY}; margin-bottom: 4px;'>⚙️ Compiling {os.path.basename(self.file_path)} with GCC (static runtime)...</div>", is_html=True)
+        self.status_label.setText("STATUS: ● COMPILING FOR EXECUTION...")
+
+        comp_cmd = [
+            compiler_bin,
+            "-std=c++17",
+            "-static",
+            "-static-libgcc",
+            "-static-libstdc++",
+            self.file_path,
+            "-o",
+            binary_path,
+        ]
+
+        comp_res = subprocess.run(comp_cmd, capture_output=True, text=True, env=env)
+        if comp_res.returncode != 0:
+            self.status_label.setText("STATUS: ● COMPILE FAILED")
+            err_html = comp_res.stderr.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+            self.terminal.append_output(f"<div style='color:{RED}; font-family:{FONT_FAMILY}; margin-top: 6px;'><b>Compilation Failed:</b><br>{err_html}</div>\n", is_html=True)
+            return
+
+        self.terminal.append_output(f"<div style='color:{GREEN}; font-family:{FONT_FAMILY}; margin: 6px 0 8px 0;'><b>✅ Compilation successful. Launching process...</b></div><br>", is_html=True)
+        self.terminal.append_output("\n", is_html=False)
+
         self.is_loading = True
-        self.loading_prefix = "STATUS: ● EXECUTING BINARY "
+        self.loading_prefix = "STATUS: ● RUNNING "
         self.loading_timer.start(300)
 
         self.terminal.setReadOnly(False)
         self.terminal.setFocus()
 
-        if hasattr(self, 'process') and self.process.state() == QProcess.ProcessState.Running:
-            self.process.kill()
-            self.process.waitForFinished()
-
         self.process = QProcess(self)
-        self.terminal.process = self.process # Link process to terminal for input
+        self.terminal.process = self.process
+
+        # Prepend compiler bin dir to PATH for DLL safety
+        penv = QProcessEnvironment.systemEnvironment()
+        bin_dir = os.path.dirname(compiler_bin) if compiler_bin else ""
+        if bin_dir:
+            penv.insert("PATH", bin_dir + os.pathsep + penv.value("PATH"))
+        self.process.setProcessEnvironment(penv)
+        self.process.setWorkingDirectory(os.path.dirname(binary_path))
+
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._read_process_output)
         self.process.finished.connect(self._on_process_finished)
         self.process.errorOccurred.connect(self._on_process_error)
-        
-        # Start the process
-        self.process.start(binary)
-        
-        # Automatically send batch input if available
+
+        # Start process
+        self.process.start(binary_path)
+
+        # Send batch input if user provided any in the input area
         input_text = self.input_area.toPlainText()
         if input_text:
             if not input_text.endswith('\n'):
@@ -2929,18 +3297,29 @@ class AppGUI(QMainWindow):
             self.process.write(input_text.encode())
 
     def _read_process_output(self):
-        data = self.process.readAllStandardOutput().data().decode()
-        # Append to terminal
-        self.terminal.append_output(data)
+        data = self.process.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        if data:
+            self.terminal.append_output(data)
 
     def _on_process_finished(self, exit_code, exit_status):
         self.loading_timer.stop()
         self.is_loading = False
-        
-        status_msg = f"STATUS: ● PROGRAM FINISHED (EXIT: {exit_code})"
-        if exit_status == QProcess.ExitStatus.CrashExit:
-            status_msg = f"STATUS: ● PROGRAM CRASHED (EXIT: {exit_code})"
-            
+
+        # Flush any remaining buffer
+        data = self.process.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        if data:
+            self.terminal.append_output(data)
+
+        cur_text = self.terminal.toPlainText()
+        prefix = "\n\n" if (cur_text and not cur_text.endswith("\n")) else "\n"
+
+        if exit_status == QProcess.ExitStatus.CrashExit or exit_code != 0:
+            status_msg = f"STATUS: ● PROGRAM EXITED (CODE: {exit_code})"
+            self.terminal.append_output(f"{prefix}<span style='color:{RED}; font-family:{FONT_FAMILY};'>[Process terminated with exit code {exit_code}]</span>\n", is_html=True)
+        else:
+            status_msg = f"STATUS: ● PROGRAM FINISHED (EXIT: 0)"
+            self.terminal.append_output(f"{prefix}<span style='color:{GREEN}; font-family:{FONT_FAMILY};'>[Process completed with exit code 0]</span>\n", is_html=True)
+
         self.status_label.setText(status_msg)
         self.terminal.setReadOnly(True)
 
@@ -2948,6 +3327,7 @@ class AppGUI(QMainWindow):
         self.loading_timer.stop()
         self.is_loading = False
         self.status_label.setText("STATUS: ● PROCESS ERROR")
+        self.terminal.append_output(f"\n<span style='color:{RED}; font-family:{FONT_FAMILY};'>[Process error: {error}]</span>\n", is_html=True)
 
     def view_ast(self):
         # Save first

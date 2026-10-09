@@ -76,8 +76,12 @@ def run_cpp_compiler(file_path, permissions=None):
         }]
     compiler_bin, env = get_compiler_cmd_and_env()
     try:
-        res=subprocess.run(
-            [compiler_bin,"-std=c++17",file_path],
+        cmd = [compiler_bin, "-std=c++17", "-static", "-static-libgcc", "-static-libstdc++", file_path]
+        out_bin = "a.exe" if (sys.platform == "win32" or os.name == "nt") else "a.out"
+        cmd.extend(["-o", out_bin])
+
+        res = subprocess.run(
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
