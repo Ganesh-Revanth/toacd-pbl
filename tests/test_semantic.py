@@ -559,5 +559,52 @@ class TestMiniCSemanticAnalyzer(unittest.TestCase):
         self.assertTrue(any("Missing return statement in non-void function 'f3'" in m for m in messages))
 
 
+    def test_all_six_rules_reported_once(self):
+        source = """
+        void helper(int a) {}
+
+        int missing_return_func() {
+            int x = 1;
+        }
+
+        int main() {
+            // Rule 1: Redeclaration in same scope
+            int dup = 1;
+            int dup = 2;
+
+            // Rule 2: Use before initialization
+            int uninit;
+            int use_uninit = uninit + 1;
+
+            // Rule 3: Undeclared variable
+            undeclared_var = 42;
+
+            // Rule 4: Type mismatch in binary operation
+            int bad_math = 5 + true;
+
+            // Rule 5: Wrong argument type in call
+            helper(true);
+
+            return 0;
+        }
+        """
+        diags = analyze(source)
+        self.assertEqual(len(diags), 6)
+
+        messages = [d.message for d in diags]
+        # Rule: Missing return in non-void function
+        self.assertEqual(sum("Missing return statement in non-void function" in m for m in messages), 1)
+        # Rule: Redeclaration in same scope
+        self.assertEqual(sum("Redeclaration of variable 'dup' in the same scope" in m for m in messages), 1)
+        # Rule: Use before initialization
+        self.assertEqual(sum("Variable 'uninit' used before initialization" in m for m in messages), 1)
+        # Rule: Undeclared variable
+        self.assertEqual(sum("Undeclared variable 'undeclared_var'" in m for m in messages), 1)
+        # Rule: Type mismatch in binary operations
+        self.assertEqual(sum("Binary operator '+' requires numeric operands" in m for m in messages), 1)
+        # Rule: Wrong argument count or types in calls
+        self.assertEqual(sum("Argument 1 of function 'helper' expects type 'int', got 'bool'" in m for m in messages), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
