@@ -35,6 +35,24 @@ class TestMiniCLexer(unittest.TestCase):
         self.assertEqual([t.type for t in tokens], expected_types)
         self.assertEqual(len(lexer.errors), 0)
 
+    def test_boolean_literals_and_void(self):
+        source = "bool ok = true; bool err = false; void run() {}"
+        tokens = Lexer(source).tokenize()
+
+        # Check true
+        tok_true = [t for t in tokens if t.type == TokenType.TRUE][0]
+        self.assertEqual(tok_true.literal, True)
+        self.assertEqual(tok_true.lexeme, "true")
+
+        # Check false
+        tok_false = [t for t in tokens if t.type == TokenType.FALSE][0]
+        self.assertEqual(tok_false.literal, False)
+        self.assertEqual(tok_false.lexeme, "false")
+
+        # Check void
+        tok_void = [t for t in tokens if t.type == TokenType.VOID][0]
+        self.assertEqual(tok_void.lexeme, "void")
+
     def test_identifiers(self):
         source = "foo bar_123 _private countX"
         tokens = Lexer(source).tokenize()
@@ -238,3 +256,4 @@ class TestMiniCLexer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
