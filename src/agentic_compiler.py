@@ -2,7 +2,7 @@
 agentic_compiler.py
 -------------------
 Autonomous ReAct (Reason + Act + Reflect) Compiler Agent for the Green Self-Healing Compiler.
-Powered exclusively by Google AI Studio (Gemini) with zero rate limits (1,000,000 TPM Free Tier).
+Powered by Google AI Studio (Gemini) via the unified LLMClient.
 Integrated with AAI Security Guardrail: Ingress injection defense & egress trojan detection.
 """
 
@@ -12,38 +12,22 @@ import json
 import os
 import re
 import time
-import urllib.request
-import urllib.error
-from typing import Callable, Optional, Dict, Any, List
+from typing import Any, Callable, Dict, List, Optional
 
-from agent_tools import compile_code, security_audit, inspect_ast, try_fast_heal
+from agent_tools import compile_code, inspect_ast, security_audit, try_fast_heal
 from aai_guardrail import AAIGuardrail, GuardrailResult
+from ai.llm_client import (
+    DEFAULT_MODEL,
+    GEMINI_API_BASE,
+    GEMINI_MODELS,
+    GeminiProvider,
+    GuardrailSecurityException,
+    LLMClient,
+    get_stored_api_key,
+)
 
 
 AI_CONFIG_FILE = "ai_config.json"
-
-DEFAULT_MODEL = "gemini-flash-lite-latest"
-
-GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-GEMINI_MODELS = [
-    "gemini-flash-lite-latest",
-    "gemini-3.5-flash-lite",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemma-4-26b-a4b-it",
-    "gemma-4-31b-it",
-    "gemini-flash-latest",
-    "gemini-3.8-flash",
-]
-
-
-def get_stored_api_key() -> Optional[str]:
-    """Retrieve Google AI Studio Gemini API key from environment variables only."""
-    for env_var in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
-        val = os.environ.get(env_var)
-        if val and val.strip():
-            return val.strip()
-    return None
 
 
 def store_api_key(api_key: str) -> None:
@@ -95,7 +79,7 @@ class CompilerAgent:
       1. Clean compilation (0 hard GCC errors)
       2. Security hardening (0 critical vulnerabilities, clean buffer safety)
       3. AAI Guardrail Protection (blocks prompt injection, policy bypass, trojan insertion)
-      4. Powered by Google AI Studio with high token capacity
+      4. Powered by Google AI Studio with high token capacity via LLMClient
     """
 
     def __init__(
@@ -103,88 +87,35 @@ class CompilerAgent:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         max_iterations: int = 6,
+        client: Optional[LLMClient] = None,
     ):
         self.api_key = api_key or get_stored_api_key()
         self.model = model or DEFAULT_MODEL
         self.max_iterations = max_iterations
         self.guardrail = AAIGuardrail()
+        self.client = client or LLMClient(
+            api_key=self.api_key,
+            model=self.model,
+            guardrail=self.guardrail,
+        )
 
     def _call_gemini(self, messages: List[Dict[str, str]], temperature: float = 0.1) -> str:
-        """Call Google AI Studio API via native REST with resilient model failover."""
-        if not self.api_key:
+        """Call LLM via provider-agnostic LLMClient wrapper."""
+        if not self.api_key and not getattr(self.client, "mock_mode", False):
             raise ValueError(
                 "Google AI Studio API Key is missing. "
                 "Please set the GEMINI_API_KEY (or GOOGLE_API_KEY) environment variable."
             )
 
-        # Extract system prompt vs conversation turns
-        system_parts = []
-        contents = []
+        # Synchronize model or key if mutated on CompilerAgent directly
+        if isinstance(getattr(self.client, "provider", None), GeminiProvider):
+            self.client.provider.api_key = self.api_key
+            self.client.provider.model = self.model
+        self.client.model = self.model
 
-        for m in messages:
-            role = m.get("role", "user")
-            content = m.get("content", "")
-            if role == "system":
-                system_parts.append(content)
-            else:
-                gemini_role = "user" if role == "user" else "model"
-                contents.append({
-                    "role": gemini_role,
-                    "parts": [{"text": content}],
-                })
-
-        # Inline system instructions directly into first user message (prevents 500 error on Gemma/Gemini)
-        if system_parts:
-            sys_combined = "\n\n".join(system_parts)
-            if contents and contents[0]["role"] == "user":
-                contents[0]["parts"][0]["text"] = f"[SYSTEM DIRECTIVE]\n{sys_combined}\n\n[TASK]\n{contents[0]['parts'][0]['text']}"
-            else:
-                contents.insert(0, {
-                    "role": "user",
-                    "parts": [{"text": f"[SYSTEM DIRECTIVE]\n{sys_combined}"}]
-                })
-
-        payload: Dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": 4096,
-            },
-        }
-
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0",
-        }
-
-        models_to_try = [self.model] + [m for m in GEMINI_MODELS if m != self.model]
-        last_error = None
-
-        for candidate in models_to_try:
-            url = f"{GEMINI_API_BASE}/{candidate}:generateContent?key={self.api_key}"
-            data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    result = json.loads(resp.read().decode("utf-8"))
-                    candidates = result.get("candidates", [])
-                    if not candidates:
-                        continue
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    if parts and "text" in parts[0]:
-                        self.model = candidate
-                        return parts[0]["text"]
-            except urllib.error.HTTPError as exc:
-                err_body = exc.read().decode("utf-8", errors="replace")
-                last_error = f"Google AI Studio Error ({exc.code}) on '{candidate}': {err_body}"
-                # If 400, 404, 429, 500, 502, 503, 504 -> try next model in GEMINI_MODELS!
-                continue
-            except Exception as exc:
-                last_error = f"Google AI Studio connection error on '{candidate}': {exc}"
-                continue
-
-        raise RuntimeError(last_error or "All Google AI Studio model candidates failed.")
+        response = self.client.generate(messages, temperature=temperature)
+        self.model = self.client.active_model
+        return response
 
     def heal(
         self,
@@ -304,12 +235,59 @@ class CompilerAgent:
                 )
                 user_prompt += f"\n### PREVIOUS ATTEMPTS & FEEDBACK:\n{prev_reflections}\n"
 
-            # Execute reasoning call on Google AI Studio
+            # Execute reasoning call via unified LLMClient
             try:
-                response = self._call_gemini([
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ])
+                response = self.client.generate(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    original_code=current_code,
+                    temperature=0.1,
+                )
+                self.model = self.client.active_model
+            except GuardrailSecurityException as g_exc:
+                if g_exc.stage == "EGRESS":
+                    egress_check = g_exc.guardrail_result
+                    if on_step:
+                        on_step(
+                            step,
+                            f"🛡️ [AAI EGRESS GUARDRAIL INTERCEPTED TROJAN]\n"
+                            f"Attack Vector: {egress_check.attack_type}\n"
+                            f"Trigger: {egress_check.trigger_pattern}\n"
+                            f"Action: {egress_check.blocked_action}",
+                            "trojan_blocked",
+                            {"guardrail": egress_check.to_dict()},
+                        )
+                    history.append({
+                        "step": step,
+                        "thought": f"Attempted patch contained unverified dangerous construct: {egress_check.trigger_pattern}. Rejected.",
+                        "outcome": f"Blocked by Egress Guardrail: {egress_check.attack_type}",
+                    })
+                    continue
+                else:
+                    ingress_check = g_exc.guardrail_result
+                    if on_step:
+                        on_step(
+                            step,
+                            f"🚨 [AAI GUARDRAIL BLOCKED ATTACK]\n"
+                            f"Attack Vector: {ingress_check.attack_type} (Severity: {ingress_check.severity})\n"
+                            f"Details: {ingress_check.description}\n"
+                            f"Trigger: {ingress_check.trigger_pattern}\n"
+                            f"Action: {ingress_check.blocked_action}",
+                            "attack_blocked",
+                            {"guardrail": ingress_check.to_dict()},
+                        )
+                    return {
+                        "success": False,
+                        "attack_blocked": True,
+                        "guardrail_finding": ingress_check.to_dict(),
+                        "final_code": current_code,
+                        "iterations": step,
+                        "history": history,
+                        "summary": f"Execution halted by AAI Security Layer: {ingress_check.attack_type}.",
+                        "tier": "guardrail_ingress",
+                    }
             except Exception as exc:
                 if on_step:
                     on_step(step, f"Google AI Studio communication failure: {exc}", "error", {})
