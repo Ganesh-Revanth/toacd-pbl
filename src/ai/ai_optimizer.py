@@ -123,7 +123,11 @@ def parse_operand(val: Any) -> Optional[Operand]:
 
 def dict_to_instruction(d: Dict[str, Any]) -> Instruction:
     """Deserialize a dictionary into a TAC Instruction."""
-    op = str(d["op"])
+    raw_op = str(d["op"]).strip()
+    if raw_op in ("=", "ASSIGN", "assign", "copy", "COPY", "move", "MOVE"):
+        op = "ASSIGN"
+    else:
+        op = raw_op
     result = str(d["result"]) if d.get("result") is not None else None
     arg1 = parse_operand(d.get("arg1"))
     arg2 = parse_operand(d.get("arg2"))
@@ -229,7 +233,8 @@ def ai_optimize_ir(
         "The program output MUST remain 100% identical. An automated interpreter will execute "
         "the code before and after your proposed changes; any discrepancy causes immediate rejection.\n"
         "Specify each suggestion with target_indices (0-based list of instruction indices being replaced) "
-        "and replacement_instructions (array of new instruction objects to insert in their place)."
+        "and replacement_instructions (array of new instruction objects to insert in their place).\n"
+        "For variable assignments or constant loads, use op: 'ASSIGN' (or '=') with result and arg1 (e.g., result='x', arg1=10)."
     )
 
     user_prompt = (

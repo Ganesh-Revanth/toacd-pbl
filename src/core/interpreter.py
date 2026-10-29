@@ -102,7 +102,7 @@ class Interpreter:
                 continue
 
             # ── Variable Assignment ───────────────────────────────────────────
-            if op == "ASSIGN":
+            if op in ("ASSIGN", "="):
                 if inst.result is not None:
                     self.set_val(inst.result, self.get_val(inst.arg1))
                 self.pc += 1

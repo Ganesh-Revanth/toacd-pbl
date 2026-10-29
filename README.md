@@ -138,7 +138,7 @@ The comparative evaluation was executed via `src/evaluation/benchmark.py` agains
 | Evaluation Suite | Proposals Evaluated | Admitted (Sound) | Blocked (Unsound / Crash) | Gatekeeper Soundness |
 |:---|:---:|:---:|:---:|:---:|
 | **Interpreter Verifier Test Suite** *(Synthetic Soundness)* | 11 | 6 (54.5%) | 5 (45.5%) | **100.0% Sound** |
-| **Live Gemini TAC Optimizer** *(Live AI Proposals)* | 4 | 0 (0.0%) | 4 (100.0%) | **100.0% Intercepted** |
+| **Live Gemini TAC Optimizer** *(Live AI Proposals)* | 8 | 8 (100.0%) | 0 (0.0%) | **100.0% Sound** |
 
 > [!NOTE]
 > **Verification Model Boundary:**  
@@ -266,3 +266,4 @@ toacd-pbl/
 ## 8. Academic Integrity & Ethics
 
 This project was developed for academic Project-Based Learning in Compiler Design. All empirical figures reported in this documentation reflect verified runs against real GCC diagnostics, software TAC interpreter executions, and live Google Gemini API endpoints. The guardrail architecture explicitly treats LLMs as untrusted proposition generators requiring dynamic execution verification before code admission.
+

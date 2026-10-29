@@ -74,7 +74,7 @@ class Instruction:
             return f"func begin {self.arg1}{params}"
         if self.op == "FUNC_END":
             return f"func end {self.arg1}"
-        if self.op == "ASSIGN":
+        if self.op in ("ASSIGN", "="):
             return f"{self.result} = {self.arg1}"
         if self.op in ("+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "&&", "||"):
             return f"{self.result} = {self.arg1} {self.op} {self.arg2}"
