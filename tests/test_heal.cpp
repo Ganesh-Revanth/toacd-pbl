@@ -41,7 +41,6 @@ bool isPositive(int n) { return n > 0; }
 // ── Error 1: Missing semicolon ────────────────────────────────────────────
 
 int add(int a, int b) {
-  int result ;
   int temp = a + b;
   if (temp > 100) {
     std::cout << "Sum is large\n";
@@ -52,7 +51,6 @@ int add(int a, int b) {
 // ── Error 2: Division by zero ─────────────────────────────────────────────
 
 int divide(int a, int b) {
-  int backup = a;
   std::cout << "Dividing " << a << " by " << b << "\n";
   std::cout << a / b << "\n";
   return a / b;
@@ -179,7 +177,6 @@ void printMessage() {
   int main() {
     printHeader("Self Healing Compiler Test");
 
-    auto w = 999;
 
     int a = 10;
     int b = 0;

@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 # Config and API keys
+ai_config.json
 groq_config.json
 .env
 
@@ -16,6 +17,7 @@ scratch/
 
 # CodeCarbon telemetry logs
 emissions*.csv
+codecarbon_emissions.csv
 
 # OS metadata
 .DS_Store

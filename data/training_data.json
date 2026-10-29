@@ -537870,5 +537870,23 @@
     "explanation": "What happened:\n The compiler expected a ';' before 'process_user_input'.\n\nWhy it happened:\n C++ has strict syntax rules. A missing semicolon, bracket, or parenthesis causes the parser to lose track of where one statement ends and another begins.\n\nHow to fix it:\n Check the line reported and the line just before it. Look for a missing ';', unmatched '(' or '{', or a stray character.",
     "suggestion": "Fix the syntax error near the reported location.",
     "confidence": 0.995787776841965
+  },
+  {
+    "message": "expected statement terminator before closing brace token",
+    "raw_message": "expected ';' before '}' token",
+    "category": "syntax_error",
+    "ast_node": null,
+    "explanation": "What happened:\n The compiler expected a ';' before '}' token.\n\nWhy it happened:\n C++ has strict syntax rules. A missing semicolon, bracket, or parenthesis causes the parser to lose track of where one statement ends and another begins.\n\nHow to fix it:\n Check the line reported and the line just before it. Look for a missing ';', unmatched '(' or '{', or a stray character.",
+    "suggestion": "Fix the syntax error near the reported location.",
+    "confidence": 0.9996876928981406
+  },
+  {
+    "message": "expected comma or statement terminator before type",
+    "raw_message": "expected ',' or ';' before 'int'",
+    "category": "syntax_error",
+    "ast_node": null,
+    "explanation": "What happened:\n The compiler expected a ',' (or ';' before 'int').\n\nWhy it happened:\n C++ has strict syntax rules. A missing semicolon, bracket, or parenthesis causes the parser to lose track of where one statement ends and another begins.\n\nHow to fix it:\n Check the line reported and the line just before it. Look for a missing ';', unmatched '(' or '{', or a stray character.",
+    "suggestion": "Fix the syntax error near the reported location.",
+    "confidence": 0.9987620195600377
   }
 ]

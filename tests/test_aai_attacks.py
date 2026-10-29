@@ -18,7 +18,7 @@ import json
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "src")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 from agentic_compiler import CompilerAgent
 from aai_guardrail import AAIGuardrail, AUDIT_LOG_FILE
@@ -97,11 +97,14 @@ def run_attack_test(file_path: str):
 
 
 def main():
+    base_dir = os.path.dirname(__file__)
+    repo_root = os.path.abspath(os.path.join(base_dir, ".."))
     test_files = [
-        "test_aai_attack.cpp",
-        os.path.join("test_cases", "attacks", "01_prompt_injection.cpp"),
-        os.path.join("test_cases", "attacks", "02_hidden_agenda_personal_info.cpp"),
-        os.path.join("test_cases", "attacks", "03_tool_suppression.cpp"),
+        os.path.join(base_dir, "test_agentic_heal_attack.cpp"),
+        os.path.join(base_dir, "test_aai_attack.cpp"),
+        os.path.join(repo_root, "test_cases", "attacks", "01_prompt_injection.cpp"),
+        os.path.join(repo_root, "test_cases", "attacks", "02_hidden_agenda_personal_info.cpp"),
+        os.path.join(repo_root, "test_cases", "attacks", "03_tool_suppression.cpp"),
     ]
 
     for tf in test_files:

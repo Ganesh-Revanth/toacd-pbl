@@ -88,20 +88,104 @@ def run_cpp_compiler(file_path, permissions=None):
             env=env,
         )
 
-        errors=[]
-        pattern=r"(.+):(\d+):(\d+):\s+(error|warning):\s+(.*)"
+        errors = []
+        diag_pattern = re.compile(
+            r"^(.+?):(\d+)(?::(\d+))?:\s*(fatal error|error|warning):\s*(.*)$"
+        )
+        linker_undef_pattern = re.compile(
+            r"(?:undefined reference to|undefined symbol:?)\s*[`'\"]?([^`'\"]+)[`'\"]?",
+            re.IGNORECASE,
+        )
 
         for line in res.stderr.splitlines():
-            match=re.match(pattern, line)
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            match = diag_pattern.match(stripped)
             if match:
+                severity = match.group(4).lower()
+                type_val = "error" if "error" in severity else severity
+                col_val = int(match.group(3)) if match.group(3) else None
                 errors.append({
                     "file": match.group(1),
                     "line": int(match.group(2)),
-                    "column": int(match.group(3)),
-                    "type": match.group(4),
-                    "message": match.group(5),
-                    "raw": line
+                    "column": col_val,
+                    "type": type_val,
+                    "message": match.group(5).strip(),
+                    "raw": line,
                 })
+                continue
+
+            undef_match = linker_undef_pattern.search(stripped)
+            if undef_match:
+                file_match = re.search(r"([A-Za-z0-9_./\\-]+\.(?:cpp|cxx|cc|c|h|hpp)):(?:(\d+):)?", stripped)
+                file_val = file_match.group(1) if file_match else file_path
+                line_val = int(file_match.group(2)) if (file_match and file_match.group(2)) else None
+                sym = undef_match.group(1).strip()
+                errors.append({
+                    "file": file_val,
+                    "line": line_val,
+                    "column": None,
+                    "type": "error",
+                    "message": f"undefined reference to '{sym}'",
+                    "raw": line,
+                })
+                continue
+
+            if re.search(r"multiple definition of\s+", stripped, re.IGNORECASE):
+                errors.append({
+                    "file": file_path,
+                    "line": None,
+                    "column": None,
+                    "type": "error",
+                    "message": stripped,
+                    "raw": line,
+                })
+                continue
+
+            if re.search(r"cannot find -l\S+", stripped, re.IGNORECASE):
+                errors.append({
+                    "file": file_path,
+                    "line": None,
+                    "column": None,
+                    "type": "error",
+                    "message": stripped,
+                    "raw": line,
+                })
+                continue
+
+            if re.search(r"Undefined symbols for architecture|symbol\(s\) not found for architecture", stripped, re.IGNORECASE):
+                errors.append({
+                    "file": file_path,
+                    "line": None,
+                    "column": None,
+                    "type": "error",
+                    "message": stripped,
+                    "raw": line,
+                })
+                continue
+
+        if res.returncode != 0 and not any(e.get("type") == "error" for e in errors):
+            meaningful_lines = [
+                l.strip() for l in res.stderr.splitlines()
+                if l.strip() and not l.strip().startswith("compilation terminated")
+            ]
+            fallback_msg = (
+                meaningful_lines[0]
+                if meaningful_lines
+                else (res.stderr.strip() or f"Compilation failed with exit code {res.returncode}.")
+            )
+            raw_msg = res.stderr.strip() if res.stderr.strip() else fallback_msg
+            errors.append({
+                "file": file_path,
+                "line": None,
+                "column": None,
+                "type": "error",
+                "message": fallback_msg,
+                "raw": raw_msg,
+            })
+
         return errors
 
     except (FileNotFoundError, OSError):

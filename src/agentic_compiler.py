@@ -38,37 +38,21 @@ GEMINI_MODELS = [
 
 
 def get_stored_api_key() -> Optional[str]:
-    """Retrieve Google AI Studio Gemini API key from environment or config file."""
+    """Retrieve Google AI Studio Gemini API key from environment variables only."""
     for env_var in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
         val = os.environ.get(env_var)
         if val and val.strip():
             return val.strip()
-
-    if os.path.exists(AI_CONFIG_FILE):
-        try:
-            with open(AI_CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                key = data.get("gemini_api_key") or data.get("api_key")
-                if key and key.strip():
-                    return key.strip()
-        except Exception:
-            pass
-
     return None
 
 
 def store_api_key(api_key: str) -> None:
-    """Store Google AI Studio Gemini API key."""
-    cfg = {"gemini_api_key": api_key.strip(), "model": DEFAULT_MODEL}
-    try:
-        with open(AI_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-    except Exception:
-        pass
+    """No-op: API keys are never stored on disk for security."""
+    pass
 
 
 def get_ai_config() -> Dict[str, Any]:
-    """Load AI Studio settings."""
+    """Load AI Studio settings. Model selection is loaded from config, key from environment only."""
     cfg = {
         "gemini_api_key": get_stored_api_key() or "",
         "model": DEFAULT_MODEL,
@@ -77,17 +61,26 @@ def get_ai_config() -> Dict[str, Any]:
         try:
             with open(AI_CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                cfg.update(data)
+                if "model" in data and data["model"]:
+                    cfg["model"] = data["model"]
         except Exception:
             pass
     return cfg
 
 
-def save_ai_config(key: str, model: Optional[str] = None) -> None:
-    """Persist Google AI Studio configuration."""
+def save_ai_config(key: str = "", model: Optional[str] = None) -> None:
+    """Persist Google AI Studio model selection to config; never writes the API key."""
+    current_model = model or DEFAULT_MODEL
+    if not model and os.path.exists(AI_CONFIG_FILE):
+        try:
+            with open(AI_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                current_model = data.get("model", DEFAULT_MODEL)
+        except Exception:
+            pass
+
     cfg = {
-        "gemini_api_key": key.strip(),
-        "model": model or DEFAULT_MODEL,
+        "model": current_model,
     }
     try:
         with open(AI_CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -121,7 +114,7 @@ class CompilerAgent:
         if not self.api_key:
             raise ValueError(
                 "Google AI Studio API Key is missing. "
-                "Please configure your Gemini API key in settings or set GEMINI_API_KEY."
+                "Please set the GEMINI_API_KEY (or GOOGLE_API_KEY) environment variable."
             )
 
         # Extract system prompt vs conversation turns
