@@ -27,7 +27,7 @@ graph TD
 
 ### Phase 1 — Front End (Lexical + Syntax + Semantic Analysis)
 
-#### [compiler_runner.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/compiler_runner.py) — **The Front End Invocation Layer**
+#### [compiler_runner.py](file:///w:/Projects/toacd-pbl/src/compiler_runner.py) — **The Front End Invocation Layer**
 
 | Compiler Design Concept | Implementation |
 |---|---|
@@ -44,7 +44,7 @@ The `_sanitize_code()` function is essentially a **lexical filter** — it patte
 
 ### Phase 2 — Diagnostic Tokenization
 
-#### [error_parser.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/error_parser.py) — **Lexical Analysis of Compiler Output**
+#### [error_parser.py](file:///w:/Projects/toacd-pbl/src/error_parser.py) — **Lexical Analysis of Compiler Output**
 
 | Compiler Design Concept | Implementation |
 |---|---|
@@ -61,7 +61,7 @@ It decomposes each raw diagnostic line into a structured **token** (a `CompilerE
 
 The parser also handles **multi-line diagnostics** (linker errors like `"Undefined symbols for architecture"`) by scanning forward until it finds the terminating pattern — analogous to how a scanner handles multi-line comments or string literals.
 
-#### [models.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/models.py) — **Intermediate Representation (IR)**
+#### [models.py](file:///w:/Projects/toacd-pbl/src/models.py) — **Intermediate Representation (IR)**
 
 The `CompilerError` class is the project's **Intermediate Representation (IR)**. Just as a compiler builds an IR to pass between phases, this dataclass carries:
 
@@ -81,7 +81,7 @@ The `CompilerError` class is the project's **Intermediate Representation (IR)**.
 
 ### Phase 3 — Token Normalization (Canonicalization)
 
-#### [error_normalizer.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/error_normalizer.py) — **Token Abstraction & Canonicalization**
+#### [error_normalizer.py](file:///w:/Projects/toacd-pbl/src/error_normalizer.py) — **Token Abstraction & Canonicalization**
 
 | Compiler Design Concept | Implementation |
 |---|---|
@@ -99,7 +99,7 @@ The `_TOKEN_MAP` is essentially a **symbol reclassification table**, converting 
 
 ### Phase 4 — Semantic Analysis (ML Classification)
 
-#### [error_classifier.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/error_classifier.py) — **Semantic Category Assignment**
+#### [error_classifier.py](file:///w:/Projects/toacd-pbl/src/error_classifier.py) — **Semantic Category Assignment**
 
 | Compiler Design Concept | Implementation |
 |---|---|
@@ -132,7 +132,7 @@ graph LR
 
 ### Phase 5 — Semantic Enrichment & Annotation
 
-#### [error_explainer.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/error_explainer.py) — **Attribute Grammar / Semantic Decoration**
+#### [error_explainer.py](file:///w:/Projects/toacd-pbl/src/error_explainer.py) — **Attribute Grammar / Semantic Decoration**
 
 | Compiler Design Concept | Implementation |
 |---|---|
@@ -146,11 +146,11 @@ This module implements an **attribute grammar** — for each classified error, i
 3. **`security_risk`** / **`risk_reason`** — Security annotations (inherited attributes from pattern matching)
 
 The three-pass resolution strategy mirrors how compilers resolve attributes:
-1. **Glossary lookup** ([common_errors.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/common_errors.py)) — a curated **lookup table** of known error patterns with pre-written explanations. Analogous to a **hardcoded semantic rule**.
+1. **Glossary lookup** ([common_errors.py](file:///w:/Projects/toacd-pbl/src/common_errors.py)) — a curated **lookup table** of known error patterns with pre-written explanations. Analogous to a **hardcoded semantic rule**.
 2. **ML classification** — when the glossary misses, the learned classifier provides a category, and a template generates the explanation. Analogous to a **grammar-driven semantic action**.
 3. **Regex fallback** — when ML confidence is below 0.45, regex patterns catch well-known messages. Analogous to **error recovery rules** in a parser.
 
-#### [common_errors.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/common_errors.py) — **Error Production Rules / Glossary**
+#### [common_errors.py](file:///w:/Projects/toacd-pbl/src/common_errors.py) — **Error Production Rules / Glossary**
 
 This file is a **production rule table** — a curated set of 24 known error patterns with pre-written semantic attributes. Each entry maps a specific diagnostic message to a fixed `category`, `explanation`, `suggestion`, `ast_node`, and `confidence`. It acts as the project's **deterministic grammar** for common errors before the ML model (the probabilistic grammar) is consulted.
 
@@ -158,7 +158,7 @@ This file is a **production rule table** — a curated set of 24 known error pat
 
 ### Phase 6 — Abstract Syntax Tree (AST) Extraction
 
-#### [ast_extractor.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/ast_extractor.py) — **AST Construction & Filtering**
+#### [ast_extractor.py](file:///w:/Projects/toacd-pbl/src/ast_extractor.py) — **AST Construction & Filtering**
 
 | Compiler Design Concept | Implementation |
 |---|---|
@@ -178,7 +178,7 @@ The filtering logic is a **tree pruning pass** — it tracks whether the current
 
 ### Phase 7 — Source-to-Source Transformation (Code Generation / Patching)
 
-#### [auto_healer.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/auto_healer.py) — **Source-to-Source Compiler (Transformations)**
+#### [auto_healer.py](file:///w:/Projects/toacd-pbl/src/auto_healer.py) — **Source-to-Source Compiler (Transformations)**
 
 | Compiler Design Concept | Implementation |
 |---|---|
@@ -213,7 +213,7 @@ This is analogous to **error recovery in parsers** where the parser tries to sug
 
 ### Phase 8 — Iterative Optimization (Heal Loop)
 
-#### [heal_loop.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/heal_loop.py) — **Multi-Pass Optimization Loop**
+#### [heal_loop.py](file:///w:/Projects/toacd-pbl/src/heal_loop.py) — **Multi-Pass Optimization Loop**
 
 | Compiler Design Concept | Implementation |
 |---|---|
@@ -244,7 +244,7 @@ The `_pre_scan()` function is a **static analysis pre-pass** — it detects issu
 
 The **seen_errors set** prevents infinite loops by detecting when the same error reappears — this is the project's **convergence check** for the fixed-point iteration.
 
-#### [healing_suggester.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/healing_suggester.py) — **Error Recovery & User Interaction**
+#### [healing_suggester.py](file:///w:/Projects/toacd-pbl/src/healing_suggester.py) — **Error Recovery & User Interaction**
 
 When auto-healing fails, this module generates structured suggestions. It is the project's **error recovery module** — analogous to panic-mode or phrase-level error recovery in a parser. It provides two types of output:
 
@@ -257,7 +257,7 @@ The `_nearest_keyword()` function uses bounded Levenshtein distance to suggest c
 
 ### Phase 9 — Static Security Analysis
 
-#### [security_analyzer.py](file:///Users/chaitanyabhagat/Desktop/Folder/cd1/src/security_analyzer.py) — **Extended Semantic Analysis (Security Pass)**
+#### [security_analyzer.py](file:///w:/Projects/toacd-pbl/src/security_analyzer.py) — **Extended Semantic Analysis (Security Pass)**
 
 | Compiler Design Concept | Implementation |
 |---|---|

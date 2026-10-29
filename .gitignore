@@ -14,6 +14,7 @@ groq_config.json
 *.o
 *.obj
 *.heal_backup
+security_demo
 scratch/
 
 # CodeCarbon telemetry logs

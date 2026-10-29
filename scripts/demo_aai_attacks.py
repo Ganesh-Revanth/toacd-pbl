@@ -1,8 +1,8 @@
 """
-test_aai_attacks.py
+demo_aai_attacks.py
 -------------------
 Academic evaluation script for testing Agentic AI (AAI) adversarial attack defense.
-Executes CompilerAgent().heal() on test_aai_attack.cpp and verifies:
+Executes CompilerAgent().heal() on test fixtures and verifies:
   1. Prompt injection / policy bypass detection.
   2. Risk assessment & severity classification.
   3. Action blockage (prevents LLM prompt execution).
@@ -16,7 +16,10 @@ import os
 import json
 
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
@@ -100,8 +103,8 @@ def main():
     base_dir = os.path.dirname(__file__)
     repo_root = os.path.abspath(os.path.join(base_dir, ".."))
     test_files = [
-        os.path.join(base_dir, "test_agentic_heal_attack.cpp"),
-        os.path.join(base_dir, "test_aai_attack.cpp"),
+        os.path.join(repo_root, "test_cases", "test_agentic_heal_attack.cpp"),
+        os.path.join(repo_root, "test_cases", "attacks", "test_aai_attack.cpp"),
         os.path.join(repo_root, "test_cases", "attacks", "01_prompt_injection.cpp"),
         os.path.join(repo_root, "test_cases", "attacks", "02_hidden_agenda_personal_info.cpp"),
         os.path.join(repo_root, "test_cases", "attacks", "03_tool_suppression.cpp"),

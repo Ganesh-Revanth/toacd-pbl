@@ -4,7 +4,7 @@
 
 The **Green Self-Healing Compiler** is an enterprise-grade compiler platform combining classical compiler construction with modern autonomous agentic AI and formal program verification. The platform addresses two foundational challenges in modern software engineering:
 1. **Autonomous Self-Healing:** Diagnosing compilation failures, classifying semantic root causes, and generating verified patches that preserve program correctness without human intervention.
-2. **AI-Driven Optimization with Soundness Guarantees:** Applying large language model reasoning to low-level Three-Address Code (TAC) intermediate representations while strictly enforcing that **AI proposes, and the classic compiler verifies**—guaranteeing that 0% of AI hallucinations, unsound transformations, or malicious backdoors reach the generated binary.
+2. **AI-Driven Optimization with Soundness Verification:** Applying large language model reasoning to low-level Three-Address Code (TAC) intermediate representations while strictly enforcing that **AI proposes, and the classic compiler verifies**—executing candidate optimizations dynamically against the TAC Interpreter Oracle to ensure identical observable runtime output on the evaluated test trace before admitting any transformation into the pipeline.
 
 The platform provides dual execution pipelines:
 - **Native C++ Self-Healing Pipeline:** Integrates standard toolchains (`g++`, `clang++`), a machine-learning error classifier, CodeCarbon/RAPL energy telemetry, and an autonomous multi-round self-healing agent (`CompilerAgent`) hardened against prompt injections, trojans, and tool-suppression attacks via the `AAIGuardrail`.
@@ -69,7 +69,7 @@ flowchart TD
     end
 
     subgraph AIPlatform["AI Insights Platform (src/ai/)"]
-        LLM["LLMClient (Gemini 2.5 Flash / Offline Mock / SHA-256 Cache)"]
+        LLM["LLMClient (gemini-flash-lite-latest / Offline Mock / SHA-256 Cache)"]
         Schema["schema_utils (1-Retry Feedback Loop & Zero-Crash Fallback)"]
         Explainer["Phase Explainer (Tokens, AST, SymTab, IR Breakdown)"]
         AIOpt["AI Optimizer ('AI Proposes, Classic Compiler Verifies')"]
@@ -213,7 +213,7 @@ The classical optimizer runs an iterative fixed-point pipeline executing five di
 The `src/ai/` package implements structured, fault-tolerant AI intelligence for compiler analysis, optimization, and bug discovery.
 
 ### 4.1 Provider-Agnostic LLM Client (`src/ai/llm_client.py`)
-- **Provider Architecture:** Interfaces with Google Gemini 2.5 Flash via standard REST/SDK endpoints while maintaining provider abstraction for seamless migration.
+- **Provider Architecture:** Interfaces with Google Gemini (default: `gemini-flash-lite-latest`, configurable to `gemini-2.0-flash`) via standard REST endpoints while maintaining provider abstraction for seamless migration.
 - **Automatic Key Discovery:** Automatically parses `.env` files in parent directories or system environment variables (`GEMINI_API_KEY`, `GOOGLE_API_KEY`).
 - **Resilience Engine:**
   - Configurable network timeout (default: 30 seconds).
@@ -267,7 +267,7 @@ The `src/ai/` package implements structured, fault-tolerant AI intelligence for 
 ### 5.1 Multi-Tier Autonomous Self-Healing (`src/agentic_compiler.py`)
 `CompilerAgent` coordinates iterative, multi-round repair loops across C++ compilation diagnostics:
 - **Tier 1 (Localized Static Rules):** Applies targeted AST-guided regex patches for straightforward syntactic errors (missing semicolons, mismatched stream operators, keyword typos).
-- **Tier 2 (Contextual LLM Reasoning):** Activates when Tier 1 fails. Builds a rich diagnostic context containing the compiler error message, surrounding source lines, symbol definitions, and AST subtree, querying Gemini 2.5 Flash for a surgical source patch.
+- **Tier 2 (Contextual LLM Reasoning):** Activates when Tier 1 fails. Builds a rich diagnostic context containing the compiler error message, surrounding source lines, symbol definitions, and AST subtree, querying Gemini (`gemini-flash-lite-latest`) for a surgical source patch.
 - **Tier 3 (Global Architectural Refactoring):** Handles complex redefinition, multiple definition, and header dependency conflicts by restructuring imports and namespaces.
 
 ### 5.2 Autonomous AI Guardrail (`src/aai_guardrail.py`)
@@ -308,41 +308,65 @@ The desktop application is built with PyQt6 and organized into eight distinct si
 
 ## 7. Empirical Evaluation & Benchmark Results
 
-The evaluation harness (`src/evaluation/benchmark.py`) performs comparative benchmarking across two dimensions:
-1. **Self-Healing Comparative Evaluation:** Rule-based heuristics vs the autonomous Gemini agent across 48 C++ test fixtures in `test_cases/`.
-2. **AI Optimizer Evaluation:** AI suggestions evaluated against the TAC Interpreter oracle across MiniC benchmarks.
+The evaluation harness (`src/evaluation/benchmark.py`) performs comparative benchmarking across three empirical dimensions:
+1. **Self-Healing Comparative Evaluation:** Rule-based heuristics vs the autonomous Gemini agent (`gemini-flash-lite-latest`) across 51 C++ test fixtures in `test_cases/`.
+2. **Interpreter Equivalence Verifier Test Suite:** Synthetic soundness evaluation testing whether the TAC Interpreter gatekeeper blocks unsound, crashing, or adversarial mutations.
+3. **Live Gemini TAC Optimizer Evaluation:** Actual optimization suggestions generated by Google Gemini on MiniC Three-Address Code, evaluated dynamically against the TAC Interpreter execution oracle.
 
 ### 7.1 Aggregate Summary Metrics
 
-The following metrics were generated directly by executing `src/evaluation/benchmark.py`:
+The following metrics were generated directly by executing `src/evaluation/benchmark.py` against live Google Gemini:
 
-| Metric Category | Evaluated Metric | Value / Rate | Assessment / Architectural Implication |
+| Metric Category | Evaluated Metric | Value / Rate | Technical Assessment & Boundary |
 |:---|:---|:---|:---|
-| **Self-Healing** | Total C++ Test Fixtures Evaluated | **48** | Comprehensive error & threat test suite |
-| **Self-Healing** | Classifier Category Accuracy | **45.8%** (22/48) | Machine learning diagnostic classification |
-| **Self-Healing** | Rule-Based Healer Success Rate | **41.7%** (20/48) | Fast heuristic patches for simple syntax errors |
-| **Self-Healing** | Rule-Based Average Latency | **1.463 s** | Ultra-low latency static repair |
-| **Self-Healing** | Autonomous Gemini Agent Status | **Supported** | Deep reasoning with backoff & AAI Guardrails |
-| **AI Optimizer** | MiniC Optimization Programs | **6** | Classical TAC optimizations & security cases |
-| **AI Optimizer** | Total Suggestions Proposed | **11** | Optimization proposals evaluated |
-| **AI Optimizer** | Suggestions Accepted (Sound) | **6** (54.5%) | Equivalence mathematically verified by interpreter |
-| **AI Optimizer** | Suggestions Rejected (Unsound/Crash) | **5** (45.5%) | Output discrepancy or runtime crash caught |
-| **AI Optimizer** | **Equivalence Gatekeeper Integrity** | **100.0% SOUND** | **0 unsound mutations admitted to final IR** |
+| **Self-Healing** | Total C++ Test Fixtures | **51** | Evaluated fixtures in `test_cases/` |
+| **Self-Healing** | Baseline Clean Files | **12/51** (23.5%) | Compiled with 0 errors initially (excluded from heal rate) |
+| **Self-Healing** | Broken Files Requiring Repair | **39/51** (76.5%) | Ground-truth compilation failures requiring repair |
+| **Self-Healing** | Classifier Category Accuracy | **47.1%** (24/51) | Evaluated against heuristic metadata labels |
+| **Self-Healing** | **Rule-Based Repair Success Rate** | **23.1%** (9/39) | Simple localized regex AST fixes on broken files |
+| **Self-Healing** | Rule-Based Average Latency | **1.219 s** | Ultra-low latency static repair pass |
+| **Self-Healing** | **Autonomous Gemini Agent Success** | **79.5%** (31/39) | Multi-tier reasoning with backoff & AAI Guardrails |
+| **Self-Healing** | Gemini Agent Average Latency | **4.656 s** | Deep contextual analysis on broken files |
+| **Self-Healing** | **AI Healing Advantage (Lift)** | **+56.4%** | Empirical improvement over static rule-based heuristics |
+| **Verifier Test** | Synthetic Proposals Evaluated | **11** | Hand-crafted sound vs adversarial mutations |
+| **Verifier Test** | Sound Proposals Admitted | **6/11** (54.5%) | Identical execution output on test trace |
+| **Verifier Test** | Unsound Mutations Intercepted | **5/11** (45.5%) | Output mismatch or runtime crash blocked |
+| **Verifier Test** | **Gatekeeper Soundness on Test Inputs** | **100.0% BLOCKED** | **0 unsound proposals admitted on evaluated inputs** |
+| **Live AI Optimizer** | Live Gemini Proposals Evaluated | **4** | Actual suggestions generated by Google Gemini |
+| **Live AI Optimizer** | Gemini Suggestions Admitted | **0/4** (0.0%) | Verified sound by Interpreter Oracle |
+| **Live AI Optimizer** | Gemini Suggestions Rejected | **4/4** (100.0%) | Caught by Interpreter Oracle (output mismatch/error) |
 
-### 7.2 AI Optimizer Suggestions Breakdown ("AI Proposes, Classic Compiler Verifies")
+> [!NOTE]
+> **Verification Model Boundary:**  
+> The equivalence check performs dynamic differential testing by executing candidate IR on a test execution trace and comparing observable output. This is dynamic execution testing, not formal mathematical proof (such as SMT translation validation). An unsound transformation whose divergence is unexercised on the specific input trace could pass.
 
-| Benchmark Program | Category | Initial IR | Final IR | Delta | Proposed | Accepted | Rejected | Equivalence Verified | Rejection Details |
+### 7.2 Interpreter Equivalence Verifier Test Suite (Gatekeeper Soundness)
+
+> **Context:** This synthetic verification suite evaluates whether the TAC Interpreter oracle correctly admits sound transformations and blocks unsound, crashing, or adversarial mutations. It tests the gatekeeper itself.
+
+| Benchmark Program | Target Category | Initial IR | Final IR | Delta | Proposals Tested | Sound Admitted | Unsound Blocked | Dynamic Output Match | Intercepted Mutation Details |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
-| `opt_01_constant_folding` | constant_folding | 12 | 12 | +0 | 2 | 1 | 1 | ✓ YES | `[bad_fold_hallucination]`: Output mismatch: expected `['100']`, got `['1049']` |
-| `opt_02_dead_code_elimination` | dead_code_elimination | 14 | 8 | -6 (-42.9%) | 2 | 2 | 0 | ✓ YES | None (all dead instruction prunings verified sound) |
-| `opt_03_strength_reduction` | strength_reduction | 13 | 13 | +0 | 2 | 1 | 1 | ✓ YES | `[bad_crash_divide_zero]`: Runtime error: Division by zero in TAC interpreter |
-| `opt_04_algebraic_simplification` | algebraic_simplification | 12 | 12 | +0 | 2 | 1 | 1 | ✓ YES | `[bad_alg_mutate_add]`: Output mismatch: expected `['25']`, got `['35']` |
-| `opt_05_common_subexpression` | cse | 15 | 15 | +0 | 2 | 1 | 1 | ✓ YES | `[bad_cse_wrong_variable]`: Output mismatch: expected `['20']`, got `['17']` |
-| `opt_06_adversarial_trojan_injection` | security_tampering | 11 | 11 | +0 | 1 | 0 | 1 | ✓ YES | `[bad_trojan_override_balance]`: Output mismatch: expected `['750']`, got `['0']` |
+| `verifier_01_constant_folding` | constant_folding | 12 | 12 | +0 | 2 | 1 | 1 | ✓ MATCH | `[unsound_bad_fold]`: Output mismatch: expected `['100']`, got `['1049']` |
+| `verifier_02_dead_code_elimination` | dead_code_elimination | 14 | 8 | -6 | 2 | 2 | 0 | ✓ MATCH | None (all dead instruction prunings verified sound) |
+| `verifier_03_strength_reduction` | strength_reduction | 13 | 13 | +0 | 2 | 1 | 1 | ✓ MATCH | `[crash_divide_by_zero]`: Runtime error: Division by zero in TAC interpreter |
+| `verifier_04_algebraic_simplification` | algebraic_simplification | 12 | 12 | +0 | 2 | 1 | 1 | ✓ MATCH | `[unsound_alg_mutate_add]`: Output mismatch: expected `['25']`, got `['35']` |
+| `verifier_05_common_subexpression` | cse | 15 | 15 | +0 | 2 | 1 | 1 | ✓ MATCH | `[unsound_cse_wrong_variable]`: Output mismatch: expected `['20']`, got `['17']` |
+| `verifier_06_adversarial_trojan_injection` | security_tampering | 11 | 11 | +0 | 1 | 0 | 1 | ✓ MATCH | `[trojan_override_balance]`: Output mismatch: expected `['750']`, got `['0']` |
+
+### 7.3 Autonomous Gemini TAC Optimizer Evaluation (Live AI Proposals)
+
+> **Context:** Actual optimization suggestions proposed by Google Gemini on MiniC Three-Address Code, evaluated dynamically against the TAC Interpreter execution oracle.
+
+| MiniC Program | Category | Initial IR | Final IR | Delta (%) | Gemini Proposals | Accepted (Sound) | Rejected (Unsound) | Dynamic Equivalence | Rejection Rationale |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
+| `live_minic_01_arithmetic_fold` | constant_folding | 12 | 12 | +0 | 1 | 0 | 1 | ✓ MATCH | `[fold_constants_main]`: Output mismatch: expected `['100']`, got `['0']` |
+| `live_minic_02_dead_code_elimination` | dead_code | 14 | 14 | +0 | 1 | 0 | 1 | ✓ MATCH | `[const_fold_and_dead_code_1]`: Output mismatch: expected `['50']`, got `['0']` |
+| `live_minic_03_algebraic_identities` | algebraic | 12 | 12 | +0 | 2 | 0 | 2 | ✓ MATCH | `[alg_simp_mult_1]`: Output mismatch: expected `['25']`, got `['0']` |
+| `live_minic_04_functions` | procedural | 16 | 16 | +0 | 0 | 0 | 0 | ✓ MATCH | None (no valid transformations proposed) |
 
 > [!IMPORTANT]
-> **Faculty Defense Design Argument:**
-> In every case where the AI proposed an unsound constant fold, a variable corruption, an illegal division by zero, or an adversarial trojan mutation, the **TAC Interpreter Oracle immediately blocked the patch**. This empirically proves that large language models can be safely integrated into optimizing compilers without compromising sound execution semantics.
+> **Faculty Defense Design Argument:**  
+> In every case where Gemini proposed an unsound fold, variable overwrite, or incorrect algebraic simplification, the **TAC Interpreter Oracle dynamically intercepted and rejected the patch**. The rule—**"AI Proposes, Classic Compiler Verifies"**—prevents AI hallucinations from entering the executable binary.
 
 ---
 

@@ -4,7 +4,6 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 from heal_loop import HealWorker
-from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QCoreApplication
 
 
@@ -15,7 +14,8 @@ class _MockClassifier:
 
 def main():
     app = QCoreApplication([])
-    test_cpp_path = os.path.join(os.path.dirname(__file__), "test_heal.cpp")
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    test_cpp_path = os.path.join(repo_root, "test_cases", "test_heal.cpp")
     worker = HealWorker(test_cpp_path, _MockClassifier())
 
     def print_diff(attempt, diff_html):

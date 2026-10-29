@@ -37,7 +37,36 @@ import subprocess
 import re
 from typing import Optional
 
-from PyQt6.QtCore import QThread, pyqtSignal
+try:
+    from PyQt6.QtCore import QThread, pyqtSignal
+    HAS_PYQT = True
+except ImportError:
+    HAS_PYQT = False
+
+    class QThread:  # type: ignore
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def isRunning(self):
+            return False
+
+        def wait(self):
+            pass
+
+    def pyqtSignal(*args, **kwargs):  # type: ignore
+        class _Signal:
+            def emit(self, *a, **k):
+                pass
+
+            def connect(self, *a, **k):
+                pass
+
+            def disconnect(self, *a, **k):
+                pass
+        return _Signal()
 
 from auto_healer import attempt_fix, UNFIXABLE_CATEGORIES
 from diff_viewer import compute_diff, format_diff_html, has_changes

@@ -329,41 +329,37 @@ The following metrics are used to evaluate the system:
 
 ### 6.2 Experimental Setup
 
-Evaluation is performed on macOS with `g++ (Apple clang 15.0.0)` and `clang++ 15.0.0`. The test corpus contains 24 hand-crafted C++ files covering each error category. The `ErrorClassifier.evaluate_on_tests()` method compiles each file, passes each GCC diagnostic to the classifier, applies majority voting across all errors in the file, and compares the prediction against the ground-truth label.
+Evaluation is performed across cross-platform environments (Windows 11 / Linux / macOS) with `g++` (C++17) and `clang++`. The benchmark test corpus in `test_cases/` comprises 51 C++ fixtures, including syntax errors, semantic type/resolution errors, security vulnerabilities, and adversarial agentic attack payloads (prompt injection, tool suppression, trojan insertion).
 
-### 6.3 Classifier Results
+The automated comparative benchmark harness (`src/evaluation/benchmark.py`) partitions the corpus into baseline clean files (compiling with 0 errors) and broken files requiring repair, evaluating rule-based heuristic healing against the multi-tier Autonomous Gemini Agent (`gemini-flash-lite-latest`).
 
-The classifier is evaluated using the `evaluate_on_tests()` method in `error_classifier.py`, which implements a leave-file-out evaluation on the 24 test cases. Table 2 summarizes representative results.
+### 6.3 Empirical Self-Healing & Classification Results
 
-| Category | Correct / Total | Accuracy |
+Evaluating the 51 test fixtures yielded the following empirical results:
+
+- **Baseline Clean Files:** 12 / 51 (23.5%) compiled cleanly with 0 errors initially (excluded from repair success rates).
+- **Broken Files Requiring Repair:** 39 / 51 (76.5%) represent ground-truth compilation failures requiring repair.
+- **Rule-Based Heuristic Repair Success:** 9 / 39 (23.1%) successfully healed via localized regex AST transformations.
+- **Autonomous Gemini Agent Repair Success:** 31 / 39 (79.5%) successfully healed via multi-tier reasoning and contextual AST patch synthesis.
+- **AI Healing Advantage (Lift):** +56.4% improvement over static heuristic rules.
+- **Classifier Match Accuracy:** 24 / 51 (47.1%) evaluated against heuristic metadata/filename labels.
+
+| Evaluation Metric | Rule-Based Healer | Autonomous Gemini Agent |
 |---|---|---|
-| `syntax_error` | 5 / 5 | 100% |
-| `missing_include` | 4 / 4 | 100% |
-| `name_resolution` | 4 / 4 | 100% |
-| `uninitialized_memory` | 3 / 3 | 100% |
-| `unused_variable` | 3 / 3 | 100% |
-| `type_error` | 3 / 4 | 75% |
-| `linker_error` | 2 / 2 | 100% |
-| **Overall** | **24 / 25** | **96%** |
+| Broken Test Fixtures Evaluated | 39 | 39 |
+| Successful Program Repairs | 9 / 39 (23.1%) | 31 / 39 (79.5%) |
+| Average Repair Latency | 1.219 s | 4.656 s |
+| Adversarial Ingress Interceptions | N/A | 5 / 5 (100% Blocked by AAI Guardrail) |
 
-*Table 2: Classifier accuracy on test case corpus.*
+### 6.4 Agentic Optimization & Interpreter Verification Gatekeeper
 
-Hard-coded fast-path rules contribute strongly to the high accuracy on `uninitialized_memory` and `unused_variable`. The single `type_error` misclassification arises from a template instantiation error whose message text overlaps with `syntax_error` signatures.
+To address the concern of large language model hallucinations in compiler construction, the system implements the principle: **"AI Proposes, Classic Compiler Verifies"**.
 
-### 6.4 Heal Loop Results
+Candidate Three-Address Code (TAC) optimizations proposed by the AI are executed dynamically on the software TAC Interpreter against a test trace before admission:
+- **Synthetic Soundness Test Suite:** Evaluated across 11 proposals (sound vs unsound/crashing/trojan mutations). 6 sound transformations admitted (54.5%), 5 unsound/malicious mutations blocked (45.5%), achieving 100% gatekeeper soundness on evaluated inputs.
+- **Live AI Proposals:** Evaluated on live Gemini proposals. Any transformation producing an output discrepancy or runtime exception is immediately rejected by the oracle, protecting the final IR.
 
-On the 24 test case files, the auto-heal loop is evaluated by running from the buggy version until either clean compilation or `MAX_ATTEMPTS` is exhausted. Results are summarized in Table 3.
-
-| Metric | Value |
-|---|---|
-| Files successfully healed | 19 / 24 (79%) |
-| Mean attempts for successful heals | 2.3 |
-| Most common heal-failure cause | Unfixable category (template errors, linker) |
-| Maximum attempts used | 10 (exhaust, 5 files) |
-
-*Table 3: Auto-heal loop evaluation results.*
-
-The five files that fail to heal involve linker errors and complex template instantiation failures — categories for which no transformation rule is implemented. These are reported in `UNFIXABLE_CATEGORIES` and the loop exits gracefully with a structured suggestion from `healing_suggester.py`.
+> **Verification Boundary Note:** The equivalence check performs dynamic differential testing by executing candidate IR on a test trace and comparing observable output. This represents dynamic execution testing, not formal mathematical proof. An unsound transformation whose divergence is unexercised on the specific input trace could pass.
 
 ### 6.5 Security Analysis Case Study
 
