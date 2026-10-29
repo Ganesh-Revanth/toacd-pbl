@@ -50,6 +50,36 @@ GEMINI_MODELS = [
 ]
 
 
+def load_env_file(path: Optional[str] = None) -> bool:
+    """
+    Convenience utility to load GEMINI_API_KEY / GOOGLE_API_KEY from a local .env file
+    into os.environ if not already present.
+    """
+    env_paths = [path] if path else [
+        os.path.join(os.getcwd(), ".env"),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")),
+    ]
+    for p in env_paths:
+        if p and os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip('"').strip("'")
+                            if k in ("GEMINI_API_KEY", "GOOGLE_API_KEY") and v:
+                                if k not in os.environ:
+                                    os.environ[k] = v
+                                return True
+            except Exception:
+                pass
+    return False
+
+
 def get_stored_api_key() -> Optional[str]:
     """Retrieve Gemini API key strictly from environment variables."""
     for env_var in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
@@ -416,7 +446,11 @@ class LLMClient:
         if ingress_result.attack_detected:
             raise GuardrailSecurityException(ingress_result, stage="INGRESS")
 
-        # ── 2. On-Disk Response Cache ─────────────────────────────────────────
+        # ── 2. Credential Validation ──────────────────────────────────────────
+        if not self.mock_mode and isinstance(self.provider, GeminiProvider) and not self.provider.api_key:
+            raise ValueError("Gemini API Key is missing. Set GEMINI_API_KEY or GOOGLE_API_KEY environment variable.")
+
+        # ── 3. On-Disk Response Cache ─────────────────────────────────────────
         if self.use_cache and not self.mock_mode:
             cached_resp = self.cache.get(self.provider_name, self.active_model, messages, temperature)
             if cached_resp is not None:
