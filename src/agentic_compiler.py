@@ -101,7 +101,7 @@ class CompilerAgent:
 
     def _call_gemini(self, messages: List[Dict[str, str]], temperature: float = 0.1) -> str:
         """Call LLM via provider-agnostic LLMClient wrapper."""
-        if not self.api_key and not getattr(self.client, "mock_mode", False):
+        if not self.api_key:
             raise ValueError(
                 "Google AI Studio API Key is missing. "
                 "Please set the GEMINI_API_KEY (or GOOGLE_API_KEY) environment variable."

@@ -31,8 +31,10 @@ class TestAgenticCompilerSecurity(unittest.TestCase):
         # Save original environment
         self._orig_gemini_key = os.environ.get("GEMINI_API_KEY")
         self._orig_google_key = os.environ.get("GOOGLE_API_KEY")
+        self._orig_mock = os.environ.get("LLM_MOCK")
         os.environ.pop("GEMINI_API_KEY", None)
         os.environ.pop("GOOGLE_API_KEY", None)
+        os.environ.pop("LLM_MOCK", None)
 
     def tearDown(self):
         # Restore original environment
@@ -45,6 +47,11 @@ class TestAgenticCompilerSecurity(unittest.TestCase):
             os.environ["GOOGLE_API_KEY"] = self._orig_google_key
         else:
             os.environ.pop("GOOGLE_API_KEY", None)
+
+        if self._orig_mock is not None:
+            os.environ["LLM_MOCK"] = self._orig_mock
+        else:
+            os.environ.pop("LLM_MOCK", None)
 
     def test_key_loaded_from_gemini_api_key_env(self):
         os.environ["GEMINI_API_KEY"] = "gemini-test-secret-key-123"
@@ -105,3 +112,6 @@ class TestAgenticCompilerSecurity(unittest.TestCase):
             agent._call_gemini([{"role": "user", "content": "hello"}])
         self.assertIn("API Key is missing", str(ctx.exception))
 
+
+if __name__ == "__main__":
+    unittest.main()
