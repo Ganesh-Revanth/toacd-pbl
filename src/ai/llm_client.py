@@ -345,6 +345,7 @@ class LLMClient:
         cache_dir: Optional[str] = None,
         use_cache: bool = True,
         mock: Optional[bool] = None,
+        mock_mode: Optional[bool] = None,
         guardrail: Optional[AAIGuardrail] = None,
     ) -> None:
         self.provider_name = provider.lower()
@@ -354,9 +355,10 @@ class LLMClient:
         self.backoff_factor = backoff_factor
         self.use_cache = use_cache
 
-        # Determine mock mode: explicit flag, or LLM_MOCK=1 env var
-        if mock is not None:
-            self.mock_mode = mock
+        # Determine mock mode: explicit flag (mock or mock_mode), or LLM_MOCK=1 env var
+        resolved_mock = mock if mock is not None else mock_mode
+        if resolved_mock is not None:
+            self.mock_mode = resolved_mock
         else:
             self.mock_mode = os.environ.get("LLM_MOCK", "").lower() in ("1", "true", "yes", "on")
 
