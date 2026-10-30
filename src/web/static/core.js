@@ -89,7 +89,7 @@ function saveProposals() {
 }
 
 /* ── Code editor ─────────────────────────────────────────────────────── */
-function Editor({ value = '', label, onChange, onRun }) {
+function Editor({ value = '', label, onChange, onRun, onCursor }) {
   const gutter = el('div', { class: 'gutter', 'aria-hidden': 'true' });
   const ta = el('textarea', {
     class: 'code-area', spellcheck: 'false', wrap: 'off', autocapitalize: 'off',
@@ -109,7 +109,7 @@ function Editor({ value = '', label, onChange, onRun }) {
   ta.addEventListener('input', () => { paint(); onChange && onChange(ta.value); });
   ta.addEventListener('scroll', () => { gutter.scrollTop = ta.scrollTop; });
   ta.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); onRun && onRun(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); onRun && onRun(e); return; }
     if (e.key === 'Escape') { tabEscape = true; return; }
     if (e.key === 'Tab' && !e.shiftKey && !tabEscape) {
       e.preventDefault();
@@ -119,10 +119,17 @@ function Editor({ value = '', label, onChange, onRun }) {
     }
     if (e.key !== 'Tab' && e.key !== 'Escape') tabEscape = false;
   });
+  const reportCursor = () => {
+    if (!onCursor) return;
+    const pos = ta.selectionStart, before = ta.value.slice(0, pos);
+    onCursor(before.split('\n').length, pos - before.lastIndexOf('\n'));
+  };
+  ['keyup', 'click', 'focus', 'input'].forEach(ev => ta.addEventListener(ev, reportCursor));
   paint();
 
   return {
     root, textarea: ta,
+    focus: () => ta.focus(),
     get: () => ta.value,
     set(v) { ta.value = v; paint(); onChange && onChange(v); },
     mark(map) { marks = map || {}; paint(); },
@@ -219,3 +226,55 @@ function IRList(texts, marks, cls) {
   return el('pre', { class: 'ir', tabindex: '0', 'aria-label': 'Instruction list' },
     texts.map((t, i) => el('div', { class: marks && marks.has(i) ? cls : '' }, el('span', { text: String(i) }), el('span', { text: t }))));
 }
+
+/* ── Loading and saving files ────────────────────────────────────────── */
+const MAX_FILE_BYTES = 200000;   // matches the server's 200 KB source limit
+
+/** Read a user-chosen file as text, with friendly errors. Calls onLoad(text, name) or onError(message). */
+async function handleFile(file, onLoad, onError) {
+  const fail = (m) => { (onError || announce)(m); };
+  if (file.size > MAX_FILE_BYTES) return fail('“' + file.name + '” is ' + Math.round(file.size / 1000) + ' KB. The limit is 200 KB.');
+  let text;
+  try { text = await file.text(); } catch (e) { return fail('Could not read “' + file.name + '”.'); }
+  if (text.includes('\u0000')) return fail('“' + file.name + '” does not look like a text file.');
+  onLoad(text.replace(/\r\n?/g, '\n'), file.name);
+}
+
+/** A button that opens the system file picker. */
+function FileLoader({ accept, label = 'Open file', onLoad, onError }) {
+  const input = el('input', { type: 'file', accept, hidden: true, tabindex: '-1', 'aria-hidden': 'true' });
+  const btn = el('button', { class: 'btn', type: 'button', title: 'Open a file from your computer (or drop it on the editor)', onClick: () => input.click() }, label);
+  input.addEventListener('change', () => { const f = input.files[0]; input.value = ''; if (f) handleFile(f, onLoad, onError); });
+  return el('span', { class: 'file-loader' }, btn, input);
+}
+
+/** Let the user drop a file onto `node`. Adds .dropping while a file is dragged over it. */
+function enableFileDrop(node, onLoad, onError) {
+  const hasFiles = (e) => e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files');
+  let depth = 0;
+  node.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; node.classList.add('dropping'); });
+  node.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+  node.addEventListener('dragleave', () => { depth = Math.max(0, depth - 1); if (!depth) node.classList.remove('dropping'); });
+  node.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); depth = 0; node.classList.remove('dropping');
+    const f = e.dataTransfer.files[0];
+    if (f) handleFile(f, onLoad, onError);
+  });
+}
+
+/** Save text to the user's computer as a file. */
+function downloadText(name, text, type = 'text/plain;charset=utf-8') {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = el('a', { href: url, download: name });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* Close any open dropdown menu when clicking elsewhere or pressing Escape. */
+document.addEventListener('click', (e) => {
+  document.querySelectorAll('details.menu[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') document.querySelectorAll('details.menu[open]').forEach(d => { d.open = false; d.querySelector('summary')?.focus(); });
+});

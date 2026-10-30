@@ -13,6 +13,14 @@ function minicMarks(d) {
   return m;
 }
 
+const MINIC_ACCEPT = '.c,.minic,.mc,.txt';
+/** Open-file button for the MiniC editors; `after` runs once the code has been replaced. */
+function minicLoader(ed, after) {
+  return FileLoader({ accept: MINIC_ACCEPT, label: 'Open file',
+    onLoad: (text) => { ed.set(text); ed.mark({}); after && after(); announce('File loaded'); },
+    onError: (msg) => announce(msg) });
+}
+
 async function ensurePipeline(code) {
   const s = state.minic;
   if (s.pipeline && s.pipelineFor === code) return s.pipeline;
@@ -98,7 +106,7 @@ function pagePipeline(root) {
     el('div', { class: 'page-head' },
       el('div', null, el('h1', { text: 'MiniC pipeline' }),
         el('p', { text: 'A small C-like language compiled by this project’s own front end: every phase below is code in src/core, not a wrapper around g++.' })),
-      el('div', { class: 'actions' }, SamplePicker('minic', (smp) => { ed.set(smp.code); s.pipeline = null; ed.mark({}); render(); }), btn)),
+      el('div', { class: 'actions' }, minicLoader(ed, () => { s.pipeline = null; render(); }), SamplePicker('minic', (smp) => { ed.set(smp.code); s.pipeline = null; ed.mark({}); render(); }), btn)),
     el('div', { class: 'split' },
       el('div', { class: 'panel' }, el('div', { class: 'panel-head' }, el('h2', { text: 'program.minic' })), ed.root,
         el('div', { class: 'panel-foot' }, el('span', { text: 'Ctrl+Enter to run' }), el('span', { text: 'Esc then Tab leaves the editor' }))),
@@ -161,12 +169,18 @@ function irView(d) {
 }
 
 /* ── AST explorer ────────────────────────────────────────────────────── */
+function miniMeta(attrs) {
+  const entries = Object.entries(attrs || {});
+  if (entries.length === 1) return String(entries[0][1]);
+  return entries.map(([k, v]) => k + '=' + v).join(', ');
+}
 function normMini(n, role) {
-  const attrs = Object.entries(n.attrs || {}).map(([k, v]) => k + '=' + JSON.stringify(v)).join('  ');
-  return { role, label: n.type, meta: attrs, pos: n.line ? n.line + ':' + n.column : '', children: (n.children || []).map(c => normMini(c.node, c.role)) };
+  return { role, label: n.type, meta: miniMeta(n.attrs), pos: n.line ? n.line + ':' + n.column : '', line: n.line || null, endLine: n.line || null,
+    children: (n.children || []).map(c => normMini(c.node, c.role)) };
 }
 function normClang(n) {
-  return { role: '', label: n.type, meta: n.details || '', pos: '', children: (n.children || []).map(normClang) };
+  return { role: '', label: n.type, meta: n.label != null ? n.label : (n.details || ''), pos: n.line ? String(n.line) : '', line: n.line || null, endLine: n.end_line || n.line || null,
+    children: (n.children || []).map(normClang) };
 }
 
 function TreeView(roots) {
@@ -213,52 +227,170 @@ function TreeView(roots) {
 }
 
 function pageAst(root) {
-  let source = state.astSource || 'minic';
+  let source = state.astSource || (state.status.clang ? 'cpp' : 'minic');
+  let viewMode = state.astView || 'graph';
+  let orient = state.astOrient || 'lr';
+  let graph = null, list = null, sourceView = null;
+
+  const codeOf = () => source === 'minic' ? state.minic.code : state.cpp.code;
   const host = el('div');
   const segMini = el('button', { 'aria-pressed': 'false', onClick: () => pick('minic') }, 'MiniC');
   const segCpp = el('button', { 'aria-pressed': 'false', onClick: () => pick('cpp') }, 'C++ (clang)');
-  const search = el('input', { type: 'search', placeholder: 'Filter nodes…', 'aria-label': 'Filter nodes' });
-  const btnOpen = el('button', { class: 'btn', onClick: () => tree && tree.setAll(true) }, 'Expand all');
-  const btnClose = el('button', { class: 'btn', onClick: () => tree && tree.setAll(false) }, 'Collapse all');
-  const hitInfo = el('span', { class: 'faint' });
-  let tree = null;
-  search.addEventListener('input', () => { if (tree) { const n = tree.filter(search.value); hitInfo.textContent = search.value.trim() ? plural(n, 'match') : ''; } });
+  const sourceChoice = el('div', { class: 'seg', role: 'group', 'aria-label': 'Language' }, segMini, segCpp);
 
-  function pick(src) { source = src; state.astSource = src; load(); }
+  function pick(src) { source = src; state.astSource = src; rebuildPicker(); load(); }
 
-  async function load() {
+  function applyCode(text, name) {
+    if (source === 'cpp') {
+      const c = state.cpp;
+      if (c.code.trim() && c.code !== c.baseline && c.code !== text && !window.confirm('Replace the code in the C++ workspace? Your unsaved changes will be lost.')) return;
+      c.code = text; c.baseline = text; if (name) c.filename = name;
+      c.result = null; c.run = null; c.lastCheckedCode = null;
+    } else {
+      state.minic.code = text; state.minic.pipeline = null; state.minic.pipelineFor = null;
+    }
+    load(); announce('Loaded ' + (name || 'example'));
+  }
+  const loaderHost = el('span', { class: 'file-loader-host' });
+  const pickerHost = el('span');
+  function rebuildPicker() {
+    loaderHost.replaceChildren(FileLoader({ accept: source === 'cpp' ? CPP_ACCEPT : MINIC_ACCEPT, label: 'Open file',
+      onLoad: (t, n) => applyCode(t, n), onError: (m) => { host.prepend(notice('bad', m)); announce(m); } }));
+    pickerHost.replaceChildren(SamplePicker(source, (smp) => applyCode(smp.code, source === 'cpp' ? fileSlug(smp.name) : undefined)));
     segMini.setAttribute('aria-pressed', String(source === 'minic'));
     segCpp.setAttribute('aria-pressed', String(source === 'cpp'));
-    tree = null; search.value = ''; hitInfo.textContent = '';
-    host.replaceChildren(el('p', { class: 'muted', text: 'Loading…' }));
+  }
+
+  const emptyState = (title, hint) => el('div', { class: 'panel' }, el('div', { class: 'empty' }, el('b', { text: title }), hint));
+
+  async function load() {
+    graph = null; list = null;
+    host.replaceChildren(el('div', { class: 'working' }, el('span', { class: 'spinner', 'aria-hidden': 'true' }), 'Building the syntax tree…'));
     try {
-      let roots, info;
+      const code = codeOf();
+      if (!code.trim()) {
+        host.replaceChildren(emptyState(source === 'minic' ? 'No MiniC code yet' : 'No C++ code yet',
+          'Use Open file or the examples menu above, or write code in the ' + (source === 'minic' ? 'MiniC pipeline' : 'C++ workspace') + '.'));
+        return;
+      }
+      let roots, info = null;
       if (source === 'minic') {
-        const code = state.minic.code;
-        if (!code.trim()) { host.replaceChildren(el('div', { class: 'panel' }, el('div', { class: 'empty' }, el('b', { text: 'No MiniC code yet' }), 'Write a program on the MiniC pipeline page first.'))); return; }
         const d = await ensurePipeline(code);
         if (!d.ast) throw new Error('No syntax tree was produced.');
         roots = [normMini(d.ast, '')];
-        info = d.parse_errors.length || d.lex_errors.length ? notice('warn', 'The program has syntax errors, so this tree is partial.') : null;
+        if (d.parse_errors.length || d.lex_errors.length) info = notice('warn', 'The program has syntax errors, so this tree is partial.');
       } else {
-        const code = state.cpp.code;
-        if (!code.trim()) { host.replaceChildren(el('div', { class: 'panel' }, el('div', { class: 'empty' }, el('b', { text: 'No C++ code yet' }), 'Load or write code in the C++ workspace first.'))); return; }
         const d = await call('/api/cpp/ast', { code });
         roots = d.tree.map(normClang);
-        info = null;
+        if (!roots.length) { host.replaceChildren(emptyState('clang produced no tree', 'The file may have fatal errors. Compile it in the C++ workspace and fix the problems first.')); return; }
       }
-      tree = TreeView(roots);
-      host.replaceChildren(info, el('div', { class: 'panel' }, el('div', { class: 'panel-body' }, tree.root),
-        el('div', { class: 'panel-foot' }, el('span', { text: plural(tree.count, 'node') }), el('span', { text: source === 'minic' ? 'From the project’s own parser' : 'From clang -ast-dump, filtered to your file' }))));
-    } catch (e) { host.replaceChildren(notice('bad', e.message)); }
+      build(roots, code, info);
+    } catch (e) {
+      host.replaceChildren(notice('bad', e.message), source === 'cpp' && !state.status.clang
+        ? el('p', { class: 'muted', style: 'margin-top:12px', text: 'clang++ is not installed or not on PATH. Switch to MiniC above, or install clang and restart the server.' }) : null);
+    }
+  }
+
+  function build(roots, code, info) {
+    sourceView = SourceView(code);
+    const details = el('div', { class: 'ast-details' });
+    const showDetails = (n) => {
+      sourceView.highlight(n && n.line, n && n.endLine);
+      if (!n) { details.replaceChildren(el('p', { class: 'muted', text: 'Click a node to see its details and the code it came from. Double-click or use the small − / + button to fold a branch.' })); return; }
+      const path = astPath(n);
+      details.replaceChildren(
+        el('div', { class: 'ad-head' }, el('b', { class: 'ad-type', text: n.type }), el('span', { class: 'kind-chip k-' + n.kind }, el('i'), AST_KINDS[n.kind].name.replace(/s$/, ''))),
+        n.details ? el('p', { class: 'ad-detail mono', text: n.details }) : null,
+        el('dl', { class: 'kv ad-kv' },
+          n.role ? el('div', null, el('dt', { text: 'Role' }), el('dd', { text: n.role })) : null,
+          n.line ? el('div', null, el('dt', { text: 'Line' }), el('dd', { text: n.line + (n.endLine && n.endLine !== n.line ? '–' + n.endLine : '') })) : null,
+          el('div', null, el('dt', { text: 'Children' }), el('dd', { text: String(n.children.length) })),
+          n.children.length ? el('div', null, el('dt', { text: 'In subtree' }), el('dd', { text: String(n.size) })) : null),
+        path.length > 1 ? el('div', { class: 'ad-path', 'aria-label': 'Path from the root' },
+          path.map((p, i) => [i ? el('span', { class: 'faint', 'aria-hidden': 'true', text: ' › ' }) : null,
+            p === n ? el('b', { text: p.type }) : el('button', { class: 'linkish', text: p.type, onClick: () => graph && graph.select(p, { center: true }) })])) : null);
+    };
+
+    let onGraphChange = () => {};
+    graph = ASTGraph(roots, { orientation: orient, rootLabel: 'TranslationUnit', onSelect: showDetails, onChange: () => onGraphChange() });
+    list = TreeView(roots);
+    showDetails(null);
+
+    const hitInfo = el('span', { class: 'faint ag-hits', role: 'status' });
+    const search = el('input', { type: 'search', placeholder: 'Find a node…', 'aria-label': 'Find a node' });
+    search.addEventListener('input', () => {
+      const q = search.value;
+      const n = viewMode === 'graph' ? graph.search(q) : list.filter(q);
+      hitInfo.textContent = q.trim() ? plural(n, 'match') : '';
+    });
+    search.addEventListener('keydown', (e) => { if (e.key === 'Enter' && viewMode === 'graph') { e.preventDefault(); graph.nextMatch(); } });
+
+    const segView = el('div', { class: 'seg', role: 'group', 'aria-label': 'View' },
+      el('button', { 'aria-pressed': String(viewMode === 'graph'), onClick: () => setView('graph') }, 'Graph'),
+      el('button', { 'aria-pressed': String(viewMode === 'list'), onClick: () => setView('list') }, 'List'));
+    const segOrient = el('div', { class: 'seg', role: 'group', 'aria-label': 'Direction' },
+      el('button', { 'aria-pressed': String(orient === 'lr'), title: 'Root on the left', onClick: () => setOrient('lr') }, '→ Left-right'),
+      el('button', { 'aria-pressed': String(orient === 'td'), title: 'Root at the top', onClick: () => setOrient('td') }, '↓ Top-down'));
+    const rolesBox = graph.hasRoles ? el('label', { class: 'check' }, el('input', { type: 'checkbox', checked: true, onChange: (e) => graph.setRoles(e.target.checked) }), 'Edge labels') : null;
+    const btnExpand = el('button', { class: 'btn', onClick: () => viewMode === 'graph' ? graph.setAll(true) : list.setAll(true) }, 'Expand all');
+    const btnCollapse = el('button', { class: 'btn', onClick: () => viewMode === 'graph' ? graph.setAll(false) : list.setAll(false) }, 'Collapse all');
+    const zoom = el('div', { class: 'seg zoom', role: 'group', 'aria-label': 'Zoom' },
+      el('button', { 'aria-label': 'Zoom out', title: 'Zoom out', onClick: () => graph.zoomOut() }, '−'),
+      el('button', { title: 'Fit the whole tree in view', onClick: () => graph.fit(false) }, 'Fit'),
+      el('button', { 'aria-label': 'Zoom in', title: 'Zoom in', onClick: () => graph.zoomIn() }, '+'));
+    const btnExport = el('button', { class: 'btn', title: 'Download the diagram as an SVG image', onClick: () => {
+      downloadText('syntax-tree.svg', graph.exportSvg(), 'image/svg+xml;charset=utf-8'); announce('Diagram saved'); } }, 'Export SVG');
+    const graphOnly = [segOrient, rolesBox, zoom, btnExport].filter(Boolean);
+
+    const legend = el('div', { class: 'ag-legend', 'aria-label': 'Colour key' },
+      ['decl', 'stmt', 'expr', 'lit'].map(k => el('span', { class: 'kind-chip k-' + k, title: AST_KINDS[k].hint }, el('i'), AST_KINDS[k].name)));
+    const foot = el('div', { class: 'panel-foot' }, el('span', { class: 'ag-count' }),
+      el('span', { text: source === 'minic' ? 'From the project’s own parser' : 'From clang -ast-dump, filtered to your file' }));
+    const stageHost = el('div', { class: 'ast-stage-host' });
+    const toolbar = el('div', { class: 'toolbar ast-toolbar', role: 'toolbar', 'aria-label': 'Tree controls' },
+      segView, ...graphOnly, el('span', { class: 'grow' }), search, hitInfo, btnExpand, btnCollapse);
+
+    function refreshCount() {
+      foot.querySelector('.ag-count').textContent = viewMode === 'graph'
+        ? graph.visibleCount() + ' of ' + plural(graph.total, 'node') + ' shown' : plural(list.count, 'node');
+    }
+    function setView(v) {
+      viewMode = v; state.astView = v; search.value = ''; hitInfo.textContent = '';
+      segView.children[0].setAttribute('aria-pressed', String(v === 'graph'));
+      segView.children[1].setAttribute('aria-pressed', String(v === 'list'));
+      graphOnly.forEach(x => { x.hidden = v !== 'graph'; });
+      legend.hidden = v !== 'graph';
+      if (v === 'graph') { graph.search(''); stageHost.replaceChildren(graph.root); requestAnimationFrame(() => graph.fit(true)); }
+      else stageHost.replaceChildren(el('div', { class: 'ast-list' }, list.root));
+      body.classList.toggle('list-mode', v === 'list');
+      refreshCount();
+    }
+    function setOrient(o) {
+      orient = o; state.astOrient = o; graph.setOrientation(o);
+      segOrient.children[0].setAttribute('aria-pressed', String(o === 'lr'));
+      segOrient.children[1].setAttribute('aria-pressed', String(o === 'td'));
+    }
+    onGraphChange = refreshCount;
+    btnExpand.addEventListener('click', refreshCount);       // the list view has no change callback
+    btnCollapse.addEventListener('click', refreshCount);
+
+    const body = el('div', { class: 'ast-body' },
+      el('div', { class: 'ast-main' }, stageHost, legend),
+      el('aside', { class: 'ast-side', 'aria-label': 'Node details and source' },
+        el('div', { class: 'ast-card' }, el('div', { class: 'section-title', text: 'Selected node' }), details),
+        el('div', { class: 'ast-card' }, el('div', { class: 'section-title', text: 'Source' }), sourceView.root)));
+
+    host.replaceChildren(info, el('div', { class: 'panel ast-panel' }, toolbar, body, foot));
+    setView(viewMode);
   }
 
   root.append(
-    el('div', { class: 'page-head' },
+    el('div', { class: 'page-head compact' },
       el('div', null, el('h1', { text: 'Syntax tree' }),
-        el('p', { text: 'The abstract syntax tree is what the parser builds from your code. Choose the MiniC tree from this project’s parser, or the C++ tree from clang.' })),
-      el('div', { class: 'actions' }, el('div', { class: 'seg', role: 'group', 'aria-label': 'Tree source' }, segMini, segCpp), search, hitInfo, btnOpen, btnClose)),
+        el('p', { text: 'See how the parser understands your code: every declaration, statement and expression becomes a node, joined to the node that contains it.' })),
+      el('div', { class: 'actions' }, sourceChoice, loaderHost, pickerHost)),
     host);
+  rebuildPicker();
   load();
 }
 
@@ -310,7 +442,7 @@ function pageAI(root) {
     el('div', { class: 'page-head' },
       el('div', null, el('h1', { text: 'AI insights' }),
         el('p', { text: 'The model explains, proposes and reviews. It never has the last word: optimizations are kept only if the program’s output is unchanged, and bug reports must point at real lines.' })),
-      el('div', { class: 'actions' }, SamplePicker('minic', (smp) => { ed.set(smp.code); ed.mark({}); tabs.refresh(); }))),
+      el('div', { class: 'actions' }, minicLoader(ed, () => tabs.refresh()), SamplePicker('minic', (smp) => { ed.set(smp.code); ed.mark({}); tabs.refresh(); }))),
     el('div', { class: 'split' },
       el('div', { class: 'panel' }, el('div', { class: 'panel-head' }, el('h2', { text: 'program.minic' })), ed.root),
       el('div', { class: 'panel' }, tabs.list, tabs.panel)));

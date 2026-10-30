@@ -239,10 +239,11 @@ A browser interface that reuses the same Python modules and needs no extra packa
 python src/web/server.py              # opens http://127.0.0.1:8765
 python src/web/server.py --no-browser --port 9000
 ```
-Pages: C++ workspace (check, explanations, suggested fixes), Changes (every proposed fix with accept / reject / undo), MiniC pipeline, Syntax tree (MiniC and clang), AI insights, Benchmark and Architecture.
+Pages: C++ workspace (Compile, Compile & Run, open/save files, explanations, suggested fixes), Changes (every proposed fix with accept / reject / undo), MiniC pipeline, Syntax tree (an interactive node-and-edge diagram for MiniC and clang: pan, zoom, fold branches, search, click a node to see its source lines, export as SVG), AI insights, Benchmark and Architecture.
 
 - Fixes are only *proposed*. The browser shows a diff and nothing changes until you press Accept.
-- The server listens on `127.0.0.1` only and never runs compiled C++ programs.
+- The server listens on `127.0.0.1` only. A C++ program runs **only when you press Compile & Run**, in a temporary folder with a 5 s timeout, a 64 KB output cap, CPU/memory/file-size limits (Linux/macOS) and no access to your API keys. This is a convenience limit, not a security sandbox: only run code you trust.
+- Open a `.cpp` file with **Open file** or drag it onto the editor (limit 200 KB); **Save** downloads the editor contents.
 - AI features need `GEMINI_API_KEY` in the environment (or a `.env` file). Without it, everything else still works. `LLM_MOCK=1` gives canned answers for an offline demo, and the UI shows a banner while it is on.
 - The Benchmark page recomputes every figure from `results/final.csv` when it loads.
 

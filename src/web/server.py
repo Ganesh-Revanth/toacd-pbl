@@ -14,8 +14,12 @@ Usage:
 Safety notes:
   * Binds to 127.0.0.1 only (never exposed to the network by default).
   * Request bodies are capped; compiler runs have timeouts and use temp dirs.
-  * The server NEVER executes compiled C++ binaries. MiniC programs run inside
-    the Python TAC interpreter, which has a step limit.
+  * C++ programs only run when the user presses "Compile & Run" (/api/cpp/run).
+    They run in a throw-away temp directory with a wall-clock timeout, an output
+    cap, CPU / memory / file-size limits (POSIX) and a stripped environment, so
+    API keys are not visible to them. This is a convenience limit for your own
+    code on your own machine, NOT a security sandbox: do not run untrusted code.
+    MiniC programs run inside the Python TAC interpreter, which has a step limit.
   * Healing endpoints only PROPOSE a patch. The browser shows the diff and the
     user accepts or rejects it; nothing is written to disk by the server.
 """
@@ -52,6 +56,10 @@ if str(SRC_DIR) not in sys.path:
 MAX_BODY_BYTES = 1_000_000
 COMPILE_TIMEOUT_S = 30
 HEAL_ATTEMPTS = 3
+RUN_TIMEOUT_S = 5
+RUN_OUTPUT_CAP = 64 * 1024          # bytes kept per stream (stdout / stderr)
+RUN_STDIN_CAP = 64 * 1024
+BIN_NAME = "out.exe" if sys.platform == "win32" else "out.bin"
 
 _ERR_PATTERN = re.compile(r"^(.+?):(\d+):(\d+):\s*(error|warning):\s*(.*)$")
 
@@ -191,7 +199,7 @@ def compile_cpp(code: str, workdir: str) -> Tuple[List[Dict[str, Any]], str, str
     env = {**env, "LC_ALL": "C", "LANGUAGE": "C"}
     try:
         res = subprocess.run(
-            [gxx, "-std=c++17", "-Wall", src, "-o", os.path.join(workdir, "out.bin")],
+            [gxx, "-std=c++17", "-Wall", src, "-o", os.path.join(workdir, BIN_NAME)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
             cwd=workdir, timeout=COMPILE_TIMEOUT_S,
         )
@@ -256,14 +264,13 @@ def _security_findings(src_path: str) -> List[Dict[str, Any]]:
         return []
 
 
-def api_cpp_analyze(body: Dict[str, Any]) -> Dict[str, Any]:
-    code = _need_code(body)
+def _analyze_in(code: str, wd: str) -> Dict[str, Any]:
+    """Compile `code` inside the existing directory `wd` and describe the result."""
     t0 = time.time()
-    with tempfile.TemporaryDirectory(prefix="webui_") as wd:
-        errors, stderr, src = compile_cpp(code, wd)
-        _classify(errors)
-        enriched = _enrich(errors, src)
-        security = _security_findings(src)
+    errors, stderr, src = compile_cpp(code, wd)
+    _classify(errors)
+    enriched = _enrich(errors, src)
+    security = _security_findings(src)
     hard = sum(1 for e in enriched if e["type"] == "error")
     warn = sum(1 for e in enriched if e["type"] == "warning")
     return {
@@ -275,6 +282,132 @@ def api_cpp_analyze(body: Dict[str, Any]) -> Dict[str, Any]:
         "raw_stderr": stderr.strip(),
         "elapsed_s": round(time.time() - t0, 3),
     }
+
+
+def api_cpp_analyze(body: Dict[str, Any]) -> Dict[str, Any]:
+    code = _need_code(body)
+    with tempfile.TemporaryDirectory(prefix="webui_") as wd:
+        return _analyze_in(code, wd)
+
+
+def _run_env(workdir: str) -> Dict[str, str]:
+    """A minimal environment: enough to run a program, nothing secret (no API keys)."""
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": workdir, "TMPDIR": workdir, "TEMP": workdir, "TMP": workdir}
+    for k in ("SYSTEMROOT", "SystemRoot", "LANG", "LC_ALL"):
+        if os.environ.get(k):
+            env[k] = os.environ[k]
+    return env
+
+
+def _signal_name(returncode: int) -> Optional[str]:
+    if returncode >= 0 or sys.platform == "win32":
+        return None
+    import signal
+    try:
+        return signal.Signals(-returncode).name
+    except ValueError:
+        return f"signal {-returncode}"
+
+
+_SIGNAL_HINTS = {
+    "SIGSEGV": "Segmentation fault: the program touched memory it does not own (null pointer, bad index, deep recursion).",
+    "SIGABRT": "Aborted: an assertion failed, an exception was not caught, or memory was freed twice.",
+    "SIGFPE": "Arithmetic error, usually an integer division by zero.",
+    "SIGKILL": "The program was killed (it probably used too much memory).",
+    "SIGXCPU": "The program used too much CPU time.",
+    "SIGXFSZ": "The program tried to write a file that was too large.",
+}
+
+
+def run_binary(binary: str, workdir: str, stdin_text: str) -> Dict[str, Any]:
+    """Run a compiled program with a timeout and output cap. Never raises for program failures."""
+    out_path, err_path, in_path = (os.path.join(workdir, n) for n in ("stdout.txt", "stderr.txt", "stdin.txt"))
+    with open(in_path, "w", encoding="utf-8", newline="") as f:
+        f.write(stdin_text)
+
+    if sys.platform == "win32":
+        cmd, extra = [binary], {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    else:
+        # ulimit failures are ignored on purpose (e.g. -v is unsupported on some systems).
+        script = ('ulimit -c 0 2>/dev/null; ulimit -t 10 2>/dev/null; ulimit -f 20480 2>/dev/null; '
+                  'ulimit -v 2097152 2>/dev/null; exec "$0"')
+        cmd, extra = ["/bin/sh", "-c", script, binary], {"start_new_session": True}
+
+    timed_out = False
+    flooded = False
+    t0 = time.time()
+    with open(in_path, "rb") as fin, open(out_path, "wb") as fout, open(err_path, "wb") as ferr:
+        try:
+            proc = subprocess.Popen(cmd, stdin=fin, stdout=fout, stderr=ferr, cwd=workdir,
+                                    env=_run_env(workdir), **extra)
+        except OSError as exc:
+            return {"started": False, "error": f"Could not start the program: {exc}"}
+
+        def kill() -> None:
+            try:
+                if sys.platform == "win32":
+                    proc.kill()
+                else:
+                    import signal
+                    os.killpg(proc.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+
+        while proc.poll() is None:
+            if time.time() - t0 > RUN_TIMEOUT_S:
+                timed_out = True
+                kill()
+                break
+            # Stop a program that floods its output long before the timeout.
+            if os.path.getsize(out_path) + os.path.getsize(err_path) > 8 * RUN_OUTPUT_CAP:
+                flooded = True
+                kill()
+                break
+            time.sleep(0.01)
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            kill()
+    elapsed_ms = int((time.time() - t0) * 1000)
+
+    def read_capped(path: str) -> Tuple[str, bool]:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            data = f.read(RUN_OUTPUT_CAP)
+        return data.decode("utf-8", errors="replace"), size > RUN_OUTPUT_CAP
+
+    stdout, out_cut = read_capped(out_path)
+    stderr, err_cut = read_capped(err_path)
+    rc = proc.returncode
+    sig = _signal_name(rc) if rc is not None else None
+    killed_by_us = timed_out or flooded
+    return {
+        "started": True,
+        "stdout": stdout, "stderr": stderr,
+        "truncated": out_cut or err_cut,
+        "exit_code": rc, "signal": None if killed_by_us else sig,
+        "signal_hint": None if killed_by_us else _SIGNAL_HINTS.get(sig or ""),
+        "timed_out": timed_out, "output_flood": flooded, "timeout_s": RUN_TIMEOUT_S,
+        "elapsed_ms": elapsed_ms,
+        "used_stdin": bool(stdin_text),
+    }
+
+
+def api_cpp_run(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Compile and, when there are no errors, run the program. Compile problems come back as in /analyze."""
+    code = _need_code(body)
+    stdin_text = body.get("stdin", "")
+    if not isinstance(stdin_text, str):
+        raise ApiError("'stdin' must be a string.")
+    if len(stdin_text.encode("utf-8")) > RUN_STDIN_CAP:
+        raise ApiError("Program input is too large (limit 64 KB).", status=413)
+    with tempfile.TemporaryDirectory(prefix="webui_run_") as wd:
+        analysis = _analyze_in(code, wd)
+        binary = os.path.join(wd, BIN_NAME)
+        if not analysis["ok"] or not os.path.isfile(binary):
+            return {"analysis": analysis, "ran": False, "run": None}
+        run = run_binary(binary, wd, stdin_text)
+    return {"analysis": analysis, "ran": bool(run.get("started")), "run": run}
 
 
 def _pick_fix_target(issues, skipped):
@@ -393,8 +526,31 @@ def api_cpp_ast(body: Dict[str, Any]) -> Dict[str, Any]:
         text = extract_ast(src)
         tree = parse_ast_to_tree(text, src)
         # hide the temp directory in node details
-        scrubbed = json.loads(json.dumps(_to_jsonable(tree)).replace(wd.replace("\\", "\\\\") + os.sep, ""))
+        scrubbed = _scrub_paths(_to_jsonable(tree), wd)
     return {"tree": scrubbed, "node_count": _count_nodes(tree)}
+
+
+def _scrub_paths(obj: Any, directory: str) -> Any:
+    """Remove `directory` (and the separator after it) from every string in a JSON-like structure.
+
+    Works on the data, not on JSON text, so Windows backslashes cannot corrupt the output.
+    Matches both separator styles because clang may print either.
+    """
+    variants = {directory, directory.replace("\\", "/"), directory.replace("/", "\\")}
+    prefixes = sorted({v + sep for v in variants for sep in ("\\", "/")}, key=len, reverse=True)
+
+    def clean(value: Any) -> Any:
+        if isinstance(value, str):
+            for pre in prefixes:
+                value = value.replace(pre, "")
+            return value
+        if isinstance(value, list):
+            return [clean(v) for v in value]
+        if isinstance(value, dict):
+            return {k: clean(v) for k, v in value.items()}
+        return value
+
+    return clean(obj)
 
 
 def _count_nodes(tree: Any) -> int:
@@ -653,8 +809,18 @@ CPP_SAMPLE_FILES = [
 ]
 
 
+CPP_STARTERS = [
+    {"name": "Hello, world", "language": "cpp", "code":
+     '#include <iostream>\n\nint main() {\n    std::cout << "Hello, world!" << std::endl;\n    return 0;\n}\n'},
+    {"name": "Add two numbers (reads input)", "language": "cpp", "code":
+     '#include <iostream>\n\nint main() {\n    int a, b;\n    std::cout << "Enter two numbers: ";\n    std::cin >> a >> b;\n    std::cout << a << " + " << b << " = " << a + b << std::endl;\n    return 0;\n}\n'},
+    {"name": "Fibonacci with a function", "language": "cpp", "code":
+     '#include <iostream>\n\nint fib(int n) {\n    if (n < 2) return n;\n    return fib(n - 1) + fib(n - 2);\n}\n\nint main() {\n    for (int i = 0; i < 10; ++i) {\n        std::cout << fib(i) << " ";\n    }\n    std::cout << std::endl;\n    return 0;\n}\n'},
+]
+
+
 def api_samples() -> Dict[str, Any]:
-    samples = list(MINIC_SAMPLES)
+    samples = list(MINIC_SAMPLES) + [dict(x) for x in CPP_STARTERS]
     for rel in CPP_SAMPLE_FILES:
         p = ROOT_DIR / "test_cases" / rel
         if p.is_file() and p.stat().st_size < 20_000:
@@ -781,6 +947,7 @@ def api_benchmark() -> Dict[str, Any]:
 
 POST_ROUTES = {
     "/api/cpp/analyze": api_cpp_analyze,
+    "/api/cpp/run": api_cpp_run,
     "/api/cpp/heal": api_cpp_heal,
     "/api/cpp/ast": api_cpp_ast,
     "/api/minic/pipeline": api_minic_pipeline,

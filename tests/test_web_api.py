@@ -183,6 +183,88 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(d["ok"])
         self.assertIn("Security Error", d["diagnostics"][0]["message"])
 
+    # -- Compile & Run ---------------------------------------------------------
+    @unittest.skipUnless(HAS_GXX, "g++ not installed")
+    def test_run_captures_stdout_stderr_and_exit_code(self):
+        code = '#include <iostream>\nint main(){ std::cout << "out"; std::cerr << "err"; return 3; }\n'
+        status, d = self.post("/api/cpp/run", {"code": code})
+        self.assertEqual(status, 200)
+        self.assertTrue(d["ran"])
+        self.assertEqual((d["run"]["stdout"], d["run"]["stderr"], d["run"]["exit_code"]), ("out", "err", 3))
+        self.assertTrue(d["analysis"]["ok"])
+
+    @unittest.skipUnless(HAS_GXX, "g++ not installed")
+    def test_run_passes_stdin_to_the_program(self):
+        code = '#include <iostream>\nint main(){ int a, b; std::cin >> a >> b; std::cout << a + b; }\n'
+        d = self.post("/api/cpp/run", {"code": code, "stdin": "12\n30\n"})[1]
+        self.assertEqual(d["run"]["stdout"], "42")
+
+    @unittest.skipUnless(HAS_GXX, "g++ not installed")
+    def test_run_does_not_run_code_that_fails_to_compile(self):
+        d = self.post("/api/cpp/run", {"code": MISSING_SEMICOLON})[1]
+        self.assertFalse(d["ran"])
+        self.assertIsNone(d["run"])
+        self.assertFalse(d["analysis"]["ok"])
+
+    @unittest.skipUnless(HAS_GXX, "g++ not installed")
+    def test_run_blocks_forbidden_calls_before_compiling(self):
+        d = self.post("/api/cpp/run", {"code": 'int main() { system("ls"); }'})[1]
+        self.assertFalse(d["ran"])
+        self.assertIn("Security Error", d["analysis"]["diagnostics"][0]["message"])
+
+    @unittest.skipUnless(HAS_GXX and os.name == "posix", "needs g++ and POSIX signals")
+    def test_run_reports_a_crash(self):
+        d = self.post("/api/cpp/run", {"code": "int main(){ int* p = 0; *p = 1; }"})[1]
+        self.assertEqual(d["run"]["signal"], "SIGSEGV")
+        self.assertTrue(d["run"]["signal_hint"])
+
+    @unittest.skipUnless(HAS_GXX, "g++ not installed")
+    def test_run_stops_an_endless_program(self):
+        saved = server.RUN_TIMEOUT_S
+        server.RUN_TIMEOUT_S = 1
+        try:
+            d = self.post("/api/cpp/run", {"code": "int main(){ while(true){} }"})[1]
+        finally:
+            server.RUN_TIMEOUT_S = saved
+        self.assertTrue(d["run"]["timed_out"])
+        self.assertLess(d["run"]["elapsed_ms"], 4000)
+
+    @unittest.skipUnless(HAS_GXX, "g++ not installed")
+    def test_run_caps_runaway_output(self):
+        code = '#include <iostream>\nint main(){ while(true) std::cout << "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n"; }'
+        d = self.post("/api/cpp/run", {"code": code})[1]
+        self.assertTrue(d["run"]["truncated"])
+        self.assertLessEqual(len(d["run"]["stdout"]), server.RUN_OUTPUT_CAP)
+
+    @unittest.skipUnless(HAS_GXX, "g++ not installed")
+    def test_programs_cannot_see_api_keys(self):
+        os.environ["GEMINI_API_KEY"] = "super-secret-value"
+        try:
+            code = '#include <cstdlib>\n#include <iostream>\nint main(){ const char* k = std::getenv("GEMINI_API_KEY"); std::cout << (k ? k : "hidden"); }'
+            d = self.post("/api/cpp/run", {"code": code})[1]
+        finally:
+            del os.environ["GEMINI_API_KEY"]
+        self.assertEqual(d["run"]["stdout"], "hidden")
+
+    def test_run_validates_stdin(self):
+        self.assertEqual(self.post("/api/cpp/run", {"code": "int main(){}", "stdin": 5})[0], 400)
+        self.assertEqual(self.post("/api/cpp/run", {"code": "int main(){}", "stdin": "x" * 70_000})[0], 413)
+
+    def test_cpp_samples_include_runnable_starters(self):
+        d = json.loads(self.get("/api/samples")[1])
+        names = [x["name"] for x in d["samples"] if x["language"] == "cpp"]
+        self.assertEqual(names[0], "Hello, world")
+
+    def test_ast_path_scrubbing_survives_windows_paths(self):
+        """Regression: backslashes in the temp dir used to corrupt the JSON ('Invalid \\escape')."""
+        wd = r"C:\Users\Me\AppData\Local\Temp\webui_x"
+        tree = [{"type": "FunctionDecl", "details": wd + r"\main.cpp:3:5 main", "children": [
+            {"type": "VarDecl", "details": wd.replace("\\", "/") + "/main.cpp x", "children": []}]}]
+        out = server._scrub_paths(tree, wd)
+        json.dumps(out)
+        self.assertEqual(out[0]["details"], "main.cpp:3:5 main")
+        self.assertEqual(out[0]["children"][0]["details"], "main.cpp x")
+
 
 class CompilerDetectionTests(unittest.TestCase):
     def test_finds_compiler_outside_path(self):
