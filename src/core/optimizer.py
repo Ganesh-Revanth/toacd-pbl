@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Set, Tuple
 
-from core.ir import Const, Instruction, Operand
+from core.ir import Const, Instruction, Operand, c_div, c_mod
 
 
 # ── Pass 1: Constant Folding ──────────────────────────────────────────────────
@@ -51,10 +51,10 @@ def constant_folding(instructions: List[Instruction]) -> Tuple[List[Instruction]
                     val = c1 * c2
                 elif inst.op == "/":
                     if c2 != 0:
-                        val = c1 // c2 if isinstance(c1, int) and isinstance(c2, int) else c1 / c2
+                        val = c_div(c1, c2)
                 elif inst.op == "%":
                     if c2 != 0:
-                        val = c1 % c2
+                        val = c_mod(c1, c2)
                 elif inst.op == "==":
                     val = (c1 == c2)
                 elif inst.op == "!=":

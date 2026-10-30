@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
-from core.ir import Const, Instruction, Operand, generate_ir
+from core.ir import Const, Instruction, Operand, c_div, c_mod, generate_ir
 
 
 @dataclass
@@ -75,9 +75,14 @@ class Interpreter:
         return operand
 
     def set_val(self, target: str, value: Any) -> None:
-        """Store a value into the current frame (or globals if at top level)."""
+        """Store a value into the current frame, or into a global when the name is
+        not a local (the IR renames locals that would shadow a global)."""
         if self.call_stack:
-            self.call_stack[-1].locals[target] = value
+            frame = self.call_stack[-1]
+            if target not in frame.locals and target in self.globals:
+                self.globals[target] = value
+            else:
+                frame.locals[target] = value
         else:
             self.globals[target] = value
 
@@ -123,11 +128,11 @@ class Interpreter:
                 elif op == "/":
                     if v2 == 0:
                         raise ZeroDivisionError("Division by zero in TAC interpreter")
-                    res = v1 // v2 if isinstance(v1, int) and isinstance(v2, int) else v1 / v2
+                    res = c_div(v1, v2)
                 elif op == "%":
                     if v2 == 0:
                         raise ZeroDivisionError("Modulo by zero in TAC interpreter")
-                    res = v1 % v2
+                    res = c_mod(v1, v2)
                 elif op == "==":
                     res = (v1 == v2)
                 elif op == "!=":

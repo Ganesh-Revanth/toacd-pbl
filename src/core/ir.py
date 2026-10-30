@@ -9,8 +9,9 @@ or control flow primitives (LABEL, JUMP, CALL, RETURN, etc.).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 from core.ast_nodes import (
     ASTNode,
@@ -32,6 +33,40 @@ from core.ast_nodes import (
 )
 from core.lexer import Lexer
 from core.parser import Parser
+
+
+# ── C-Style Arithmetic Helpers ────────────────────────────────────────────────
+
+def c_div(a: Any, b: Any) -> Any:
+    """Division with C semantics: integer division truncates toward zero."""
+    if isinstance(a, int) and isinstance(b, int) and not isinstance(a, bool) and not isinstance(b, bool):
+        q = abs(a) // abs(b)
+        return q if (a >= 0) == (b >= 0) else -q
+    return a / b
+
+
+def c_mod(a: Any, b: Any) -> Any:
+    """Remainder with C semantics: the result takes the sign of the dividend."""
+    if isinstance(a, int) and isinstance(b, int):
+        return a - c_div(a, b) * b
+    return math.fmod(a, b)
+
+
+def _collect_names(node: Any, out: set) -> None:
+    """Collect every identifier-like name used anywhere in an AST (for collision avoidance)."""
+    if isinstance(node, ASTNode):
+        for attr in ("name", "target", "callee"):
+            v = getattr(node, attr, None)
+            if isinstance(v, str):
+                out.add(v)
+        for p in getattr(node, "params", None) or []:
+            if isinstance(p, (tuple, list)) and len(p) == 2:
+                out.add(p[1])
+        for v in vars(node).values():
+            _collect_names(v, out)
+    elif isinstance(node, (list, tuple)):
+        for v in node:
+            _collect_names(v, out)
 
 
 # ── TAC Values & Instructions ─────────────────────────────────────────────────
@@ -113,12 +148,44 @@ class IRGenerator:
         self.instructions: List[Instruction] = []
         self.temp_counter: int = 0
         self.label_counter: int = 0
+        # Lexical-scope bookkeeping: maps source names to unique IR names so that
+        # shadowed variables never alias each other in the flat TAC namespace.
+        self.scopes: List[Dict[str, str]] = []
+        self.used_locals: Set[str] = set()
+        self.global_names: Set[str] = set()
+        self.reserved: Set[str] = set()   # every user-written name in the program
+        self.rename_counter: Dict[str, int] = {}
 
     def new_temp(self) -> str:
-        """Allocate a unique temporary variable name."""
-        t = f"t{self.temp_counter}"
-        self.temp_counter += 1
-        return t
+        """Allocate a unique temporary name that can never collide with a user identifier."""
+        while True:
+            t = f"t{self.temp_counter}"
+            self.temp_counter += 1
+            if t not in self.reserved:
+                return t
+
+    def _declare(self, name: str) -> str:
+        """Bind a newly declared source variable to a unique IR name in the current scope."""
+        if not self.scopes:
+            return name  # global scope: keep the source name
+        unique = name
+        if unique in self.used_locals or unique in self.global_names:
+            while True:
+                n = self.rename_counter.get(name, 0) + 1
+                self.rename_counter[name] = n
+                unique = f"{name}_{n}"
+                if unique not in self.reserved and unique not in self.used_locals:
+                    break
+        self.used_locals.add(unique)
+        self.scopes[-1][name] = unique
+        return unique
+
+    def _resolve(self, name: str) -> str:
+        """Find the unique IR name for a source identifier (falls back to the global name)."""
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name]
+        return name
 
     def new_label(self, prefix: str = "L") -> str:
         """Allocate a unique jump label name."""
@@ -141,6 +208,12 @@ class IRGenerator:
     def generate(self, program: Program) -> List[Instruction]:
         """Main entry point: generate TAC for an entire Program AST."""
         self.instructions.clear()
+        self.scopes = []
+        self.used_locals = set()
+        self.rename_counter = {}
+        self.reserved = set()
+        _collect_names(program, self.reserved)
+        self.global_names = {d.name for d in program.declarations if isinstance(d, VarDecl)}
 
         has_main = False
         functions: List[FunctionDef] = []
@@ -191,28 +264,40 @@ class IRGenerator:
         param_names = [p[1] for p in node.params]
         self.emit("FUNC_BEGIN", arg1=node.name, arg2=param_names)
 
+        # Parameters keep their literal names (the interpreter binds them by name).
+        self.scopes = [{p: p for p in param_names}]
+        self.used_locals = set(param_names)
+
         if node.body:
             for stmt in node.body.statements:
                 self.visit(stmt)
+
+        self.scopes = []
+        self.used_locals = set()
 
         # Safety return for void functions
         self.emit("RETURN")
         self.emit("FUNC_END", arg1=node.name)
 
     def visit_Block(self, node: Block) -> None:
+        self.scopes.append({})
         for stmt in node.statements:
             self.visit(stmt)
+        self.scopes.pop()
 
     # ── Statements ────────────────────────────────────────────────────────────
 
     def visit_VarDecl(self, node: VarDecl) -> None:
+        # The initializer is evaluated in the *enclosing* binding (so `int x = x + 1;`
+        # in an inner scope refers to the outer x), then the new name is declared.
+        val = self.visit(node.initializer) if node.initializer is not None else None
+        name = self._declare(node.name)
         if node.initializer is not None:
-            val = self.visit(node.initializer)
-            self.emit("ASSIGN", result=node.name, arg1=val)
+            self.emit("ASSIGN", result=name, arg1=val)
 
     def visit_Assign(self, node: Assign) -> None:
         val = self.visit(node.value)
-        self.emit("ASSIGN", result=node.target, arg1=val)
+        self.emit("ASSIGN", result=self._resolve(node.target), arg1=val)
 
     def visit_If(self, node: If) -> None:
         cond = self.visit(node.condition)
@@ -262,14 +347,33 @@ class IRGenerator:
         return Const(node.value)
 
     def visit_Identifier(self, node: Identifier) -> Operand:
-        return node.name
+        return self._resolve(node.name)
 
     def visit_BinaryOp(self, node: BinaryOp) -> Operand:
+        if node.operator in ("&&", "||"):
+            return self._short_circuit(node)
         left = self.visit(node.left)
         right = self.visit(node.right)
         t = self.new_temp()
         self.emit(node.operator, result=t, arg1=left, arg2=right)
         return t
+
+    def _short_circuit(self, node: BinaryOp) -> Operand:
+        """Lower `a && b` / `a || b` so the right operand is only evaluated when needed."""
+        result = self.new_temp()
+        lbl_end = self.new_label("L_sc_end")
+        left = self.visit(node.left)
+        self.emit("ASSIGN", result=result, arg1=left)
+        if node.operator == "&&":
+            self.emit("JUMP_IF_FALSE", arg1=result, arg2=lbl_end)
+        else:
+            negated = self.new_temp()
+            self.emit("!", result=negated, arg1=result)
+            self.emit("JUMP_IF_FALSE", arg1=negated, arg2=lbl_end)
+        right = self.visit(node.right)
+        self.emit("ASSIGN", result=result, arg1=right)
+        self.emit("LABEL", arg1=lbl_end)
+        return result
 
     def visit_UnaryOp(self, node: UnaryOp) -> Operand:
         operand = self.visit(node.operand)

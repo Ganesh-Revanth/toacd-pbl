@@ -10,7 +10,7 @@ Features:
   - Single-character operators: +, -, *, /, %, <, >, !, =.
   - Delimiters: (, ), {, }, ;, ,.
   - Integer, float, and escaped string literals.
-  - Line comments starting with '//'.
+  - Line comments starting with '//' and block comments '/* ... */'.
   - Resilient error handling: unknown characters and unterminated strings are
     recorded in `lexer.errors` with line & column and emitted as ERROR tokens
     instead of raising unhandled exceptions.
@@ -193,6 +193,30 @@ class Lexer:
                 self.advance()
                 while not self.is_at_end() and self.peek() != "\n":
                     self.advance()
+            elif c == "/" and self.peek_next() == "*":
+                # Block comment: consume until the closing */
+                start_line, start_col = self.line, self.column
+                self.advance()
+                self.advance()
+                closed = False
+                while not self.is_at_end():
+                    if self.peek() == "*" and self.peek_next() == "/":
+                        self.advance()
+                        self.advance()
+                        closed = True
+                        break
+                    if self.advance() == "\n":
+                        self.line += 1
+                        self.column = 1
+                if not closed:
+                    self.errors.append(
+                        LexerError(
+                            message="Unterminated block comment",
+                            line=start_line,
+                            column=start_col,
+                            char="/*",
+                        )
+                    )
             else:
                 break
 
