@@ -1,0 +1,2697 @@
+diff --git a/README.md b/README.md
+index 5eb9444..910377d 100644
+--- a/README.md
++++ b/README.md
+@@ -201,20 +201,20 @@ python src/gui.py
+ ### 6.2 Self-Healing Compiler CLI
+ Run autonomous iterative healing on any broken C++ source file:
+ ```bash
+-python heal.py test_cases/syntax_error.cpp
++python src/main.py test_cases/syntax_error.cpp
+ ```
+ 
+-### 6.3 MiniC Clean-Room Compiler CLI
+-Inspect each classical compilation phase for MiniC source programs:
++### 6.3 MiniC Clean-Room Compiler (Python API)
++Inspect each classical compilation phase for a MiniC program. Run from the repository root:
+ ```bash
+ # Tokenize
+-python -c "from src.core.lexer import Lexer; print(Lexer('int main() { return 42; }').tokenize())"
++python -c "import sys; sys.path.insert(0,'src'); from core.lexer import Lexer; print(Lexer('int main() { return 42; }').tokenize())"
+ 
+-# Parse AST
+-python -c "from src.core.lexer import Lexer; from src.core.parser import Parser; print(Parser(Lexer('int main() { int x = 10; return x; }').tokenize()).parse().to_tree())"
++# Parse and pretty-print the AST
++python -c "import sys; sys.path.insert(0,'src'); from core.lexer import Lexer; from core.parser import Parser; from core.ast_nodes import pretty_print_ast; print(pretty_print_ast(Parser(Lexer('int main() { int x = 10; return x; }').tokenize()).parse()))"
+ 
+-# Generate TAC IR & Optimize
+-python -c "from src.core.lexer import Lexer; from src.core.parser import Parser; from src.core.semantic import SemanticAnalyzer; from src.core.ir import generate_ir; from src.core.optimizer import optimize_ir; ast = Parser(Lexer('int main() { int a = 2 + 3; return a; }').tokenize()).parse(); SemanticAnalyzer().analyze(ast); ir = generate_ir(ast); opt_ir, passes = optimize_ir(ir); print('Optimized IR:', len(opt_ir))"
++# Generate three-address code, optimize it, and run both versions
++python -c "import sys; sys.path.insert(0,'src'); from core.ir import generate_ir; from core.optimizer import optimize; from core.interpreter import run_ir; ir = generate_ir('int main() { int a = 2 + 3; print(a); return a; }'); opt, stats = optimize(ir); print(len(ir), '->', len(opt), 'instructions'); print(run_ir(ir), run_ir(opt))"
+ ```
+ 
+ ### 6.4 Comparative Benchmark Suite
+@@ -233,6 +233,19 @@ Execute the comprehensive 161-test pytest validation suite:
+ pytest tests/ -v
+ ```
+ 
++### 6.6 Web Studio (browser interface)
++A browser interface that reuses the same Python modules and needs no extra packages:
++```bash
++python src/web/server.py              # opens http://127.0.0.1:8765
++python src/web/server.py --no-browser --port 9000
++```
++Pages: C++ workspace (check, explanations, suggested fixes), Changes (every proposed fix with accept / reject / undo), MiniC pipeline, Syntax tree (MiniC and clang), AI insights, Benchmark and Architecture.
++
++- Fixes are only *proposed*. The browser shows a diff and nothing changes until you press Accept.
++- The server listens on `127.0.0.1` only and never runs compiled C++ programs.
++- AI features need `GEMINI_API_KEY` in the environment (or a `.env` file). Without it, everything else still works. `LLM_MOCK=1` gives canned answers for an offline demo, and the UI shows a banner while it is on.
++- The Benchmark page recomputes every figure from `results/final.csv` when it loads.
++
+ ---
+ 
+ ## 7. Project Structure & Documentation
+diff --git a/src/auto_healer.py b/src/auto_healer.py
+index 512cb1a..648dcd1 100644
+--- a/src/auto_healer.py
++++ b/src/auto_healer.py
+@@ -621,6 +621,7 @@ def fix_syntax_error(source: str, error: dict) -> Optional[str]:
+ 
+     # Fix: missing semicolon (check previous non-empty line first, then current line)
+     if (re.search(r"expected\s+['\"]?;['\"]?", msg) or
++        re.search(r"expected\s+['\"]?,['\"]?\s+or\s+['\"]?;['\"]?", msg) or
+         "expected initializer before" in msg or
+         "expected unqualified-id before" in msg or
+         "expected primary-expression before" in msg or
+@@ -1156,11 +1157,20 @@ _HANDLERS = {
+ UNFIXABLE_CATEGORIES = {"linker_error", "access_error", "unused_variable"}
+ 
+ 
++_CURLY_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
++
++
++def _ascii_quotes(text: str) -> str:
++    """GCC prints curly quotes in UTF-8 locales; all fix patterns expect ASCII quotes."""
++    return text.translate(_CURLY_QUOTES)
++
++
+ def attempt_fix(source: str, error: dict) -> Optional[str]:
+     """
+     Main entry point.
+     Returns patched source string, or None if no fix could be applied.
+     """
++    error = {**error, "message": _ascii_quotes(error.get("message", ""))}
+     category = error.get("category", "other")
+     msg = error.get("message", "").lower()
+ 
+diff --git a/src/core/interpreter.py b/src/core/interpreter.py
+index 45d40f6..4e8a5f3 100644
+--- a/src/core/interpreter.py
++++ b/src/core/interpreter.py
+@@ -248,8 +248,9 @@ class Interpreter:
+                 self.pc += 1
+                 continue
+ 
+-            # Unknown instruction
+-            self.pc += 1
++            # Unknown instruction: fail loudly. Silently skipping it would let an
++            # AI-proposed patch containing a bogus opcode pass the equivalence check.
++            raise RuntimeError(f"Unknown TAC instruction op '{op}' at pc={self.pc}")
+ 
+         if step >= max_steps:
+             raise TimeoutError(f"Interpreter exceeded maximum steps limit ({max_steps})")
+diff --git a/src/web/__init__.py b/src/web/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/src/web/server.py b/src/web/server.py
+new file mode 100644
+index 0000000..49267d5
+--- /dev/null
++++ b/src/web/server.py
+@@ -0,0 +1,892 @@
++"""
++server.py
++---------
++Local web UI for the Green Self-Healing Compiler.
++
++Runs on Python's standard library only (no Flask/FastAPI needed) and reuses the
++existing modules: error_explainer, auto_healer, diff_viewer, ast_extractor,
++security_analyzer, agentic_compiler, and the MiniC core + AI packages.
++
++Usage:
++    python src/web/server.py                # http://127.0.0.1:8765
++    python src/web/server.py --port 9000 --no-browser
++
++Safety notes:
++  * Binds to 127.0.0.1 only (never exposed to the network by default).
++  * Request bodies are capped; compiler runs have timeouts and use temp dirs.
++  * The server NEVER executes compiled C++ binaries. MiniC programs run inside
++    the Python TAC interpreter, which has a step limit.
++  * Healing endpoints only PROPOSE a patch. The browser shows the diff and the
++    user accepts or rejects it; nothing is written to disk by the server.
++"""
++
++from __future__ import annotations
++
++import argparse
++import csv
++import dataclasses
++import json
++import mimetypes
++import os
++import re
++import subprocess
++import sys
++import tempfile
++import threading
++import time
++import traceback
++import webbrowser
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
++from typing import Any, Dict, List, Optional, Tuple
++from urllib.parse import urlparse
++
++WEB_DIR = Path(__file__).resolve().parent
++SRC_DIR = WEB_DIR.parent
++ROOT_DIR = SRC_DIR.parent
++STATIC_DIR = WEB_DIR / "static"
++
++if str(SRC_DIR) not in sys.path:
++    sys.path.insert(0, str(SRC_DIR))
++
++MAX_BODY_BYTES = 1_000_000
++COMPILE_TIMEOUT_S = 30
++HEAL_ATTEMPTS = 3
++
++_ERR_PATTERN = re.compile(r"^(.+?):(\d+):(\d+):\s*(error|warning):\s*(.*)$")
++
++
++# ──────────────────────────────────────────────────────────────────────────────
++# Helpers
++# ──────────────────────────────────────────────────────────────────────────────
++
++class ApiError(Exception):
++    def __init__(self, message: str, status: int = 400) -> None:
++        super().__init__(message)
++        self.message = message
++        self.status = status
++
++
++def _load_env() -> None:
++    try:
++        from ai.llm_client import load_env_file
++        load_env_file()
++    except Exception:
++        pass
++
++
++def _mock_enabled() -> bool:
++    return os.environ.get("LLM_MOCK", "").lower() in ("1", "true", "yes", "on")
++
++
++def _api_key() -> Optional[str]:
++    try:
++        from ai.llm_client import get_stored_api_key
++        return get_stored_api_key()
++    except Exception:
++        return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
++
++
++def _require_llm() -> None:
++    if not _api_key() and not _mock_enabled():
++        raise ApiError(
++            "No Gemini API key found. Set the GEMINI_API_KEY environment variable "
++            "(or put it in a .env file) and restart the server. "
++            "For an offline demo, start the server with LLM_MOCK=1.",
++            status=412,
++        )
++
++
++def _to_jsonable(obj: Any) -> Any:
++    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
++        return {f.name: _to_jsonable(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
++    if isinstance(obj, dict):
++        return {str(k): _to_jsonable(v) for k, v in obj.items()}
++    if isinstance(obj, (list, tuple, set)):
++        return [_to_jsonable(v) for v in obj]
++    if isinstance(obj, (str, int, float, bool)) or obj is None:
++        return obj
++    return str(obj)
++
++
++def _need_code(body: Dict[str, Any]) -> str:
++    code = body.get("code")
++    if not isinstance(code, str) or not code.strip():
++        raise ApiError("Request needs a non-empty 'code' string.")
++    if len(code) > 200_000:
++        raise ApiError("Source code is too large (limit 200 KB).", status=413)
++    return code
++
++
++def diff_lines(original: str, patched: str, context: int = 3) -> List[Dict[str, Any]]:
++    from diff_viewer import compute_diff
++    return [
++        {"old": d.line_no_old, "new": d.line_no_new, "kind": d.kind, "text": d.content}
++        for d in compute_diff(original, patched, context)
++    ]
++
++
++# ──────────────────────────────────────────────────────────────────────────────
++# C++ compile / analyze / heal
++# ──────────────────────────────────────────────────────────────────────────────
++
++_classifier_lock = threading.Lock()
++_classifier: Any = None
++_classifier_tried = False
++
++
++def _get_classifier():
++    global _classifier, _classifier_tried
++    with _classifier_lock:
++        if _classifier_tried:
++            return _classifier
++        _classifier_tried = True
++        try:
++            import warnings
++            warnings.filterwarnings("ignore")
++            from error_classifier import ErrorClassifier
++            clf = ErrorClassifier()
++            if clf.load():
++                _classifier = clf
++        except Exception:
++            _classifier = None
++        return _classifier
++
++
++def _classify(errors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    clf = _get_classifier()
++    for e in errors:
++        if e.get("category"):
++            continue
++        cat, conf = "other", 0.5
++        if clf is not None:
++            try:
++                c, p = clf.predict(e.get("message", ""))
++                cat, conf = (c or "other"), float(p)
++            except Exception:
++                pass
++        e["category"] = cat
++        e["confidence"] = round(conf, 3)
++    return errors
++
++
++def compile_cpp(code: str, workdir: str) -> Tuple[List[Dict[str, Any]], str, str]:
++    """Compile `code` with g++ inside workdir. Returns (errors, stderr, source_path)."""
++    from compiler_runner import _sanitize_code, get_compiler_cmd_and_env
++
++    src = os.path.join(workdir, "main.cpp")
++    with open(src, "w", encoding="utf-8") as f:
++        f.write(code)
++
++    if not _sanitize_code(code):
++        return ([{
++            "file": src, "line": 1, "column": 1, "type": "error",
++            "message": "Security Error: Malicious command injection or forbidden system call detected.",
++            "raw": "error: Malicious code blocked",
++            "category": "security_violation", "confidence": 1.0,
++        }], "error: Malicious code blocked", src)
++
++    gxx, env = get_compiler_cmd_and_env()
++    # ASCII diagnostics: GCC prints curly quotes in UTF-8 locales, which breaks pattern matching.
++    env = {**env, "LC_ALL": "C", "LANGUAGE": "C"}
++    try:
++        res = subprocess.run(
++            [gxx, "-std=c++17", "-Wall", src, "-o", os.path.join(workdir, "out.bin")],
++            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
++            cwd=workdir, timeout=COMPILE_TIMEOUT_S,
++        )
++    except FileNotFoundError:
++        raise ApiError("g++ was not found on this machine. Install a C++ toolchain and restart.", 503)
++    except subprocess.TimeoutExpired:
++        return ([{
++            "file": src, "line": 1, "column": 1, "type": "error",
++            "message": f"Compilation timed out after {COMPILE_TIMEOUT_S}s.",
++            "raw": "timeout", "category": "other", "confidence": 1.0,
++        }], "timeout", src)
++
++    errors: List[Dict[str, Any]] = []
++    for line in res.stderr.splitlines():
++        m = _ERR_PATTERN.match(line.strip())
++        if m:
++            errors.append({
++                "file": m.group(1), "line": int(m.group(2)), "column": int(m.group(3)),
++                "type": m.group(4), "message": m.group(5), "raw": line,
++            })
++    if res.returncode != 0 and not errors:
++        first = res.stderr.strip().splitlines()[0] if res.stderr.strip() else "Compilation failed"
++        errors.append({
++            "file": src, "line": 1, "column": 1, "type": "error",
++            "message": first, "raw": first, "category": "other", "confidence": 0.5,
++        })
++    return errors, res.stderr, src
++
++
++def _enrich(errors: List[Dict[str, Any]], src_path: str) -> List[Dict[str, Any]]:
++    """Add explanation, suggestion, context and security info using the existing explainer."""
++    from models import CompilerError
++    from error_explainer import enrich_error
++
++    out = []
++    for e in errors:
++        ce = CompilerError(e.get("file") or src_path, e.get("line"), e.get("column"),
++                           e.get("type", "error"), e.get("message", ""), e.get("raw", ""))
++        try:
++            enrich_error(ce)
++        except Exception:
++            pass
++        d = ce.to_dict()
++        d["file"] = "main.cpp"
++        d["category"] = e.get("category") or d.get("category")
++        if e.get("category"):
++            d["confidence"] = e.get("confidence", d.get("confidence"))
++        out.append(d)
++    return out
++
++
++def _security_findings(src_path: str) -> List[Dict[str, Any]]:
++    try:
++        from security_analyzer import analyze
++        res = []
++        for f in analyze(src_path, []):
++            d = f.to_dict()
++            d["file"] = "main.cpp"
++            res.append(d)
++        return res
++    except Exception:
++        return []
++
++
++def api_cpp_analyze(body: Dict[str, Any]) -> Dict[str, Any]:
++    code = _need_code(body)
++    t0 = time.time()
++    with tempfile.TemporaryDirectory(prefix="webui_") as wd:
++        errors, stderr, src = compile_cpp(code, wd)
++        _classify(errors)
++        enriched = _enrich(errors, src)
++        security = _security_findings(src)
++    hard = sum(1 for e in enriched if e["type"] == "error")
++    warn = sum(1 for e in enriched if e["type"] == "warning")
++    return {
++        "ok": hard == 0,
++        "error_count": hard,
++        "warning_count": warn,
++        "diagnostics": enriched,
++        "security": security,
++        "raw_stderr": stderr.strip(),
++        "elapsed_s": round(time.time() - t0, 3),
++    }
++
++
++def _pick_fix_target(issues, skipped):
++    from auto_healer import UNFIXABLE_CATEGORIES
++    for kind in ("error", "warning"):
++        for it in issues:
++            if it.get("type") != kind or it.get("category") in UNFIXABLE_CATEGORIES:
++                continue
++            key = (it.get("line"), it.get("message"))
++            if key in skipped:
++                continue
++            return it
++    return None
++
++
++def api_cpp_heal(body: Dict[str, Any]) -> Dict[str, Any]:
++    """Rule-based or AI healing. Returns a PROPOSAL (original, patched, diff, steps)."""
++    code = _need_code(body)
++    mode = body.get("mode", "rules")
++    if mode == "ai":
++        return _heal_ai(code)
++    if mode != "rules":
++        raise ApiError("mode must be 'rules' or 'ai'.")
++
++    from auto_healer import attempt_fix
++
++    t0 = time.time()
++    steps: List[Dict[str, Any]] = []
++    current = code
++    skipped: set = set()
++    with tempfile.TemporaryDirectory(prefix="webui_") as wd:
++        for attempt in range(1, HEAL_ATTEMPTS + 1):
++            errors, _, _ = compile_cpp(current, wd)
++            _classify(errors)
++            target = _pick_fix_target(errors, skipped)
++            if target is None:
++                break
++            patched = attempt_fix(current, target)
++            if not patched or patched == current:
++                skipped.add((target.get("line"), target.get("message")))
++                steps.append({
++                    "attempt": attempt, "fixed": False,
++                    "line": target.get("line"), "message": target.get("message"),
++                    "category": target.get("category"),
++                    "note": "No automatic rule could fix this diagnostic.",
++                })
++                continue
++            steps.append({
++                "attempt": attempt, "fixed": True,
++                "line": target.get("line"), "message": target.get("message"),
++                "category": target.get("category"),
++                "diff": diff_lines(current, patched, 1),
++            })
++            current = patched
++        final_errors, _, src = compile_cpp(current, wd)
++        _classify(final_errors)
++        remaining = _enrich(final_errors, src)
++
++    hard = sum(1 for e in remaining if e["type"] == "error")
++    return {
++        "mode": "rules",
++        "original": code,
++        "patched": current,
++        "changed": current != code,
++        "compiles": hard == 0,
++        "steps": steps,
++        "remaining": remaining,
++        "diff": diff_lines(code, current, 3),
++        "elapsed_s": round(time.time() - t0, 3),
++    }
++
++
++def _heal_ai(code: str) -> Dict[str, Any]:
++    _require_llm()
++    try:
++        from agentic_compiler import CompilerAgent
++    except Exception as exc:  # e.g. PyQt6 missing in the environment
++        raise ApiError(f"AI agent could not be loaded: {exc}", 503)
++    t0 = time.time()
++    steps: List[Dict[str, Any]] = []
++
++    def on_step(step, thought, action, meta):
++        steps.append({"attempt": step, "thought": str(thought)[:600],
++                      "action": str(action)[:200], "fixed": None})
++
++    try:
++        result = CompilerAgent().heal(code, None, on_step=on_step)
++    except Exception as exc:
++        raise ApiError(f"AI healing failed: {type(exc).__name__}: {exc}", 502)
++
++    final = result.get("final_code") or code
++    return {
++        "mode": "ai",
++        "original": code,
++        "patched": final,
++        "changed": final != code,
++        "compiles": bool(result.get("success")),
++        "steps": steps,
++        "summary": result.get("summary", ""),
++        "iterations": result.get("iterations"),
++        "remaining": [],
++        "diff": diff_lines(code, final, 3),
++        "elapsed_s": round(time.time() - t0, 3),
++    }
++
++
++def api_cpp_ast(body: Dict[str, Any]) -> Dict[str, Any]:
++    code = _need_code(body)
++    from ast_extractor import extract_ast, parse_ast_to_tree
++    if not shutil_which("clang++"):
++        raise ApiError("clang++ was not found. Install clang to use the C++ AST view.", 503)
++    with tempfile.TemporaryDirectory(prefix="webui_") as wd:
++        src = os.path.join(wd, "main.cpp")
++        with open(src, "w", encoding="utf-8") as f:
++            f.write(code)
++        text = extract_ast(src)
++        tree = parse_ast_to_tree(text, src)
++        # hide the temp directory in node details
++        scrubbed = json.loads(json.dumps(_to_jsonable(tree)).replace(wd.replace("\\", "\\\\") + os.sep, ""))
++    return {"tree": scrubbed, "node_count": _count_nodes(tree)}
++
++
++def _count_nodes(tree: Any) -> int:
++    if isinstance(tree, list):
++        return sum(_count_nodes(t) for t in tree)
++    if isinstance(tree, dict):
++        return 1 + _count_nodes(tree.get("children", []))
++    return 0
++
++
++def shutil_which(name: str) -> Optional[str]:
++    import shutil
++    return shutil.which(name)
++
++
++# ──────────────────────────────────────────────────────────────────────────────
++# MiniC pipeline
++# ──────────────────────────────────────────────────────────────────────────────
++
++def ast_to_json(node: Any) -> Any:
++    """Generic AST -> {type, line, column, attrs, children:[{role, node}]} converter."""
++    from core.ast_nodes import ASTNode
++    if not isinstance(node, ASTNode):
++        return None
++    attrs: Dict[str, Any] = {}
++    children: List[Dict[str, Any]] = []
++    for f in dataclasses.fields(node):
++        if f.name in ("line", "column"):
++            continue
++        val = getattr(node, f.name)
++        if isinstance(val, ASTNode):
++            children.append({"role": f.name, "node": ast_to_json(val)})
++        elif isinstance(val, list) and val and all(isinstance(v, ASTNode) for v in val):
++            for i, v in enumerate(val):
++                children.append({"role": f"{f.name}[{i}]", "node": ast_to_json(v)})
++        elif val is None:
++            continue
++        else:
++            attrs[f.name] = val if isinstance(val, (str, int, float, bool)) else str(val)
++    return {"type": type(node).__name__, "line": node.line, "column": node.column,
++            "attrs": attrs, "children": children}
++
++
++def _collect_locals(program: Any) -> List[Dict[str, Any]]:
++    """Walk the AST and list every function, parameter and variable with its scope."""
++    from core.ast_nodes import ASTNode, FunctionDef, VarDecl
++    out: List[Dict[str, Any]] = []
++
++    def walk(n: Any, scope: str) -> None:
++        if isinstance(n, FunctionDef):
++            out.append({"name": n.name, "kind": "function", "type": n.return_type,
++                        "scope": "global", "line": n.line,
++                        "detail": "(" + ", ".join(f"{t} {p}" for t, p in n.params) + ")"})
++            for t, p in n.params:
++                out.append({"name": p, "kind": "param", "type": t, "scope": n.name,
++                            "line": n.line, "detail": ""})
++            walk(n.body, n.name)
++            return
++        if isinstance(n, VarDecl):
++            out.append({"name": n.name, "kind": "variable", "type": n.var_type,
++                        "scope": scope, "line": n.line, "detail": ""})
++        if isinstance(n, ASTNode):
++            for f in dataclasses.fields(n):
++                v = getattr(n, f.name)
++                if isinstance(v, ASTNode):
++                    walk(v, scope)
++                elif isinstance(v, list):
++                    for item in v:
++                        if isinstance(item, ASTNode):
++                            walk(item, scope)
++
++    walk(program, "global")
++    return out
++
++
++def _inst_list(instructions: List[Any]) -> List[Dict[str, Any]]:
++    return [{"i": i, "text": str(inst)} for i, inst in enumerate(instructions)]
++
++
++def api_minic_pipeline(body: Dict[str, Any]) -> Dict[str, Any]:
++    code = _need_code(body)
++    from core.lexer import Lexer
++    from core.parser import Parser
++    from core.semantic import SemanticAnalyzer
++    from core.ir import generate_ir
++    from core.optimizer import optimize
++    from core.interpreter import run_ir
++
++    lexer = Lexer(code)
++    tokens = lexer.tokenize()
++    lex_errors = [{"message": e.message, "line": e.line, "column": e.column} for e in lexer.errors]
++
++    parser = Parser(tokens)
++    program = parser.parse()
++    parse_errors = [{"message": e.message, "line": e.line, "column": e.column,
++                     "expected": getattr(e, "expected", None)} for e in parser.errors]
++
++    result: Dict[str, Any] = {
++        "tokens": [{"type": getattr(t.type, "name", str(t.type)), "lexeme": t.lexeme,
++                    "line": t.line, "column": t.column} for t in tokens],
++        "lex_errors": lex_errors,
++        "parse_errors": parse_errors,
++        "ast": ast_to_json(program),
++        "semantic": [],
++        "symbols": [],
++        "ir": [], "optimized_ir": [], "opt_stats": {},
++        "output": None, "optimized_output": None, "equivalent": None, "runtime_error": None,
++        "stage_reached": "parse",
++    }
++    if lex_errors or parse_errors:
++        return result
++
++    analyzer = SemanticAnalyzer()
++    diags = analyzer.analyze(program)
++    result["semantic"] = [{"message": d.message, "line": d.line, "column": d.column,
++                           "severity": d.severity} for d in diags]
++    result["symbols"] = _collect_locals(program)
++    result["stage_reached"] = "semantic"
++    if any(d.severity == "error" for d in diags):
++        return result
++
++    try:
++        ir = generate_ir(program)
++        opt, stats = optimize(ir)
++    except Exception as exc:
++        result["runtime_error"] = f"IR generation failed: {type(exc).__name__}: {exc}"
++        return result
++    result["ir"] = _inst_list(ir)
++    result["optimized_ir"] = _inst_list(opt)
++    result["opt_stats"] = stats
++    result["stage_reached"] = "ir"
++
++    try:
++        before = run_ir(ir)
++        after = run_ir(opt)
++        result.update(output=before, optimized_output=after, equivalent=(before == after))
++        result["stage_reached"] = "executed"
++    except Exception as exc:
++        result["runtime_error"] = f"{type(exc).__name__}: {exc}"
++    return result
++
++
++def _ai_call(fn):
++    """Run an AI function and translate known failures into friendly API errors."""
++    _require_llm()
++    try:
++        return fn()
++    except ApiError:
++        raise
++    except Exception as exc:
++        name = type(exc).__name__
++        if name == "GuardrailSecurityException":
++            raise ApiError(f"Blocked by the AI security guardrail: {exc}", 403)
++        if name == "LLMCommunicationError":
++            raise ApiError(f"Could not reach the AI model: {exc}", 502)
++        raise ApiError(f"AI feature failed: {name}: {exc}", 500)
++
++
++def api_minic_ai(body: Dict[str, Any]) -> Dict[str, Any]:
++    code = _need_code(body)
++    action = body.get("action")
++    if action not in ("explain", "optimize", "bugs"):
++        raise ApiError("action must be one of: explain, optimize, bugs.")
++    _require_llm()
++
++    from core.lexer import Lexer
++    from core.parser import Parser
++    from core.semantic import SemanticAnalyzer
++
++    lexer = Lexer(code)
++    tokens = lexer.tokenize()
++    parser = Parser(tokens)
++    program = parser.parse()
++    if lexer.errors or parser.errors:
++        first = (lexer.errors or parser.errors)[0]
++        raise ApiError(f"Fix syntax errors first (line {first.line}): {first.message}", 422)
++
++    t0 = time.time()
++    if action == "explain":
++        from ai.phase_explainer import explain_compilation
++        data = _ai_call(lambda: explain_compilation(code))
++        return {"action": action, "result": _to_jsonable(data), "elapsed_s": round(time.time() - t0, 2)}
++
++    if action == "bugs":
++        from ai.bug_detector import detect_bugs
++        data = _ai_call(lambda: detect_bugs(code, ast=program))
++        return {"action": action, "result": _to_jsonable(data), "elapsed_s": round(time.time() - t0, 2)}
++
++    # optimize
++    from ai.ai_optimizer import ai_optimize_ir
++    from core.ir import generate_ir
++    analyzer = SemanticAnalyzer()
++    diags = analyzer.analyze(program)
++    if any(d.severity == "error" for d in diags):
++        raise ApiError(f"Fix semantic errors first: {diags[0].message}", 422)
++    ir = generate_ir(program)
++    data = _ai_call(lambda: ai_optimize_ir(ir))
++    before = [str(i) for i in data.get("initial_ir", ir)]
++    after = [str(i) for i in data.get("optimized_ir", ir)]
++    return {
++        "action": action,
++        "result": {
++            "analysis": data.get("analysis", ""),
++            "accepted": _to_jsonable(data.get("accepted_suggestions", [])),
++            "rejected": _to_jsonable(data.get("rejected_suggestions", [])),
++            "initial_count": data.get("initial_instruction_count", len(before)),
++            "final_count": data.get("final_instruction_count", len(after)),
++            "equivalence_verified": data.get("equivalence_verified"),
++            "ir_before": before,
++            "ir_after": after,
++            "ir_diff": _text_diff(before, after),
++        },
++        "elapsed_s": round(time.time() - t0, 2),
++    }
++
++
++def _text_diff(a: List[str], b: List[str]) -> List[Dict[str, Any]]:
++    return diff_lines("\n".join(a), "\n".join(b), 2)
++
++
++# ──────────────────────────────────────────────────────────────────────────────
++# Status, samples, benchmark
++# ──────────────────────────────────────────────────────────────────────────────
++
++MINIC_SAMPLES = [
++    {"name": "Arithmetic & folding", "language": "minic", "code":
++     "int main() {\n    int a = 10 * 5 + 20;\n    int b = a + 30;\n    print(b);\n    return b;\n}\n"},
++    {"name": "Loop sum", "language": "minic", "code":
++     "int main() {\n    int i = 0;\n    int total = 0;\n    while (i < 10) {\n        total = total + i * 2;\n        i = i + 1;\n    }\n    print(total);\n    return 0;\n}\n"},
++    {"name": "Functions & recursion", "language": "minic", "code":
++     "int fact(int n) {\n    if (n <= 1) {\n        return 1;\n    }\n    return n * fact(n - 1);\n}\n\nint main() {\n    print(fact(5));\n    return 0;\n}\n"},
++    {"name": "Dead code", "language": "minic", "code":
++     "int main() {\n    int x = 42;\n    int unused = 100 * 20;\n    int y = x + 0;\n    print(y);\n    return 0;\n}\n"},
++    {"name": "Has semantic errors", "language": "minic", "code":
++     "int main() {\n    int a = 1;\n    int a = 2;\n    b = 3;\n    bool flag = 5;\n    return 0;\n}\n"},
++    {"name": "Has syntax errors", "language": "minic", "code":
++     "int main() {\n    int x = ;\n    if (x > 0 {\n        print(x);\n    }\n    return 0;\n}\n"},
++]
++
++CPP_SAMPLE_FILES = [
++    "mini/tc01_missing_semicolon.cpp", "mini/tc02_undeclared_variable.cpp",
++    "mini/tc03_missing_include.cpp", "mini/tc05_missing_closing_brace.cpp",
++    "mini/tc06_wrong_stream_operator.cpp", "mini/tc07_keyword_typo.cpp",
++    "type_error.cpp", "success.cpp",
++]
++
++
++def api_samples() -> Dict[str, Any]:
++    samples = list(MINIC_SAMPLES)
++    for rel in CPP_SAMPLE_FILES:
++        p = ROOT_DIR / "test_cases" / rel
++        if p.is_file() and p.stat().st_size < 20_000:
++            nice = p.stem.replace("_", " ")
++            samples.append({"name": nice, "language": "cpp",
++                            "code": p.read_text(encoding="utf-8", errors="replace")})
++    return {"samples": samples}
++
++
++def api_status() -> Dict[str, Any]:
++    model = None
++    try:
++        from ai.llm_client import DEFAULT_MODEL
++        model = DEFAULT_MODEL
++    except Exception:
++        pass
++    return {
++        "llm_key_present": bool(_api_key()),
++        "llm_mock": _mock_enabled(),
++        "ai_ready": bool(_api_key()) or _mock_enabled(),
++        "model": model,
++        "gxx": bool(shutil_which("g++")),
++        "clang": bool(shutil_which("clang++")),
++        "heal_attempts": HEAL_ATTEMPTS,
++    }
++
++
++def _num(row: Dict[str, str], key: str) -> Optional[float]:
++    try:
++        return float(row.get(key, ""))
++    except (TypeError, ValueError):
++        return None
++
++
++def api_benchmark() -> Dict[str, Any]:
++    """Read results/final.csv and recompute every aggregate from the raw rows."""
++    path = ROOT_DIR / "results" / "final.csv"
++    if not path.is_file():
++        raise ApiError("results/final.csv not found. Run src/evaluation/benchmark.py first.", 404)
++    with open(path, newline="", encoding="utf-8") as f:
++        rows = list(csv.DictReader(f))
++
++    healing = [r for r in rows if r.get("suite") == "healing"]
++    broken = [r for r in healing if str(r.get("baseline_clean", "")).lower() != "true"]
++    rule_ok = [r for r in broken if r.get("rule_compiled") == "yes"]
++    ai_ok = [r for r in broken if r.get("llm_compiled") == "yes"]
++    ai_ran = [r for r in broken if r.get("llm_compiled") in ("yes", "no")]
++    clf_ok = [r for r in healing if r.get("category_matched") == "yes"]
++
++    def avg(rs, key):
++        vals = [v for v in (_num(r, key) for r in rs) if v is not None]
++        return round(sum(vals) / len(vals), 3) if vals else None
++
++    def pct(a, b):
++        return round(100.0 * a / b, 1) if b else None
++
++    verifier = [r for r in rows if r.get("suite") == "ai_optimizer"]
++    live = [r for r in rows if r.get("suite") == "live_llm_optimizer"]
++
++    def sums(rs, k):
++        return int(sum(_num(r, k) or 0 for r in rs))
++
++    return {
++        "healing": {
++            "total_fixtures": len(healing),
++            "already_clean": len(healing) - len(broken),
++            "broken": len(broken),
++            "rule_fixed": len(rule_ok),
++            "rule_rate": pct(len(rule_ok), len(broken)),
++            "rule_avg_s": avg(broken, "rule_time_sec"),
++            "ai_ran": len(ai_ran),
++            "ai_fixed": len(ai_ok),
++            "ai_rate": pct(len(ai_ok), len(ai_ran)) if ai_ran else None,
++            "ai_avg_s": avg(ai_ran, "llm_time_sec"),
++            # AI "misses" that returned in <50 ms never reached the model: the
++            # security guardrail blocked those (attack-test) files on purpose.
++            "ai_guardrail_blocked": sum(
++                1 for r in ai_ran
++                if r.get("llm_compiled") == "no" and (_num(r, "llm_time_sec") or 0) < 0.05
++            ),
++            "classifier_accuracy": pct(len(clf_ok), len(healing)),
++            "note": "'Fixed' means the file now compiles; it does not prove the program still behaves correctly.",
++        },
++        "verifier": {
++            "programs": len(verifier),
++            "proposed": sums(verifier, "suggestions_proposed"),
++            "accepted": sums(verifier, "suggestions_accepted"),
++            "rejected": sums(verifier, "suggestions_rejected"),
++            "note": "Scripted test of the equivalence checker with hand-written good and bad suggestions. Not an AI result.",
++        },
++        "live_optimizer": {
++            "programs": len(live),
++            "proposed": sums(live, "suggestions_proposed"),
++            "accepted": sums(live, "suggestions_accepted"),
++            "rejected": sums(live, "suggestions_rejected"),
++            "ir_removed": sums(live, "instruction_delta") * -1,
++            "note": "Real Gemini suggestions on MiniC programs, accepted only if program output is unchanged.",
++        },
++        "per_file": [
++            {"file": os.path.basename(r.get("file", "")),
++             "baseline_clean": str(r.get("baseline_clean", "")).lower() == "true",
++             "rule": r.get("rule_compiled"), "ai": r.get("llm_compiled"),
++             "rule_time": _num(r, "rule_time_sec"), "ai_time": _num(r, "llm_time_sec")}
++            for r in healing
++        ],
++        "live_rows": [
++            {"file": r.get("file"), "proposed": _num(r, "suggestions_proposed"),
++             "accepted": _num(r, "suggestions_accepted"), "rejected": _num(r, "suggestions_rejected"),
++             "initial": _num(r, "initial_instructions"), "final": _num(r, "final_instructions")}
++            for r in live
++        ],
++        "verifier_rows": [
++            {"file": r.get("file"), "proposed": _num(r, "suggestions_proposed"),
++             "accepted": _num(r, "suggestions_accepted"), "rejected": _num(r, "suggestions_rejected"),
++             "reason": r.get("rejection_reasons")}
++            for r in verifier
++        ],
++    }
++
++
++# ──────────────────────────────────────────────────────────────────────────────
++# HTTP layer
++# ──────────────────────────────────────────────────────────────────────────────
++
++POST_ROUTES = {
++    "/api/cpp/analyze": api_cpp_analyze,
++    "/api/cpp/heal": api_cpp_heal,
++    "/api/cpp/ast": api_cpp_ast,
++    "/api/minic/pipeline": api_minic_pipeline,
++    "/api/minic/ai": api_minic_ai,
++}
++GET_ROUTES = {
++    "/api/status": api_status,
++    "/api/samples": api_samples,
++    "/api/benchmark": api_benchmark,
++}
++
++
++class Handler(BaseHTTPRequestHandler):
++    server_version = "GreenCompilerUI/1.0"
++
++    def log_message(self, fmt: str, *args: Any) -> None:
++        if os.environ.get("WEBUI_VERBOSE"):
++            super().log_message(fmt, *args)
++
++    # -- responses ------------------------------------------------------------
++    def _send_json(self, payload: Any, status: int = 200) -> None:
++        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
++        self.send_response(status)
++        self.send_header("Content-Type", "application/json; charset=utf-8")
++        self.send_header("Content-Length", str(len(data)))
++        self.send_header("Cache-Control", "no-store")
++        self.end_headers()
++        self.wfile.write(data)
++
++    def _send_static(self, rel: str) -> None:
++        rel = rel.lstrip("/") or "index.html"
++        target = (STATIC_DIR / rel).resolve()
++        if STATIC_DIR.resolve() not in target.parents and target != STATIC_DIR.resolve():
++            return self._send_json({"error": "Not found"}, 404)
++        if not target.is_file():
++            return self._send_json({"error": "Not found"}, 404)
++        ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
++        data = target.read_bytes()
++        self.send_response(200)
++        self.send_header("Content-Type", f"{ctype}; charset=utf-8" if ctype.startswith("text/") or "javascript" in ctype else ctype)
++        self.send_header("Content-Length", str(len(data)))
++        self.send_header("Cache-Control", "no-cache")
++        self.end_headers()
++        self.wfile.write(data)
++
++    # -- verbs ----------------------------------------------------------------
++    def do_GET(self) -> None:
++        path = urlparse(self.path).path
++        fn = GET_ROUTES.get(path)
++        if fn:
++            return self._run(fn)
++        if path.startswith("/api/"):
++            return self._send_json({"error": "Unknown endpoint"}, 404)
++        self._send_static(path)
++
++    def do_POST(self) -> None:
++        path = urlparse(self.path).path
++        fn = POST_ROUTES.get(path)
++        if not fn:
++            return self._send_json({"error": "Unknown endpoint"}, 404)
++        try:
++            length = int(self.headers.get("Content-Length", "0"))
++        except ValueError:
++            length = 0
++        if length <= 0 or length > MAX_BODY_BYTES:
++            return self._send_json({"error": "Request body missing or too large."}, 413 if length else 400)
++        try:
++            body = json.loads(self.rfile.read(length).decode("utf-8"))
++            if not isinstance(body, dict):
++                raise ValueError
++        except (ValueError, UnicodeDecodeError):
++            return self._send_json({"error": "Request body must be a JSON object."}, 400)
++        self._run(fn, body)
++
++    def _run(self, fn, *args) -> None:
++        try:
++            self._send_json(fn(*args))
++        except ApiError as e:
++            self._send_json({"error": e.message}, e.status)
++        except Exception as e:  # last-resort guard so the UI always gets JSON
++            if os.environ.get("WEBUI_VERBOSE"):
++                traceback.print_exc()
++            self._send_json({"error": f"Internal error: {type(e).__name__}: {e}"}, 500)
++
++
++def make_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
++    _load_env()
++    srv = ThreadingHTTPServer((host, port), Handler)
++    srv.daemon_threads = True
++    return srv
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser(description="Green Self-Healing Compiler web UI")
++    ap.add_argument("--host", default="127.0.0.1")
++    ap.add_argument("--port", type=int, default=8765)
++    ap.add_argument("--no-browser", action="store_true")
++    args = ap.parse_args()
++
++    srv = make_server(args.host, args.port)
++    url = f"http://{args.host}:{args.port}/"
++    st = api_status()
++    print(f"Green Self-Healing Compiler web UI running at {url}")
++    print(f"  g++: {'yes' if st['gxx'] else 'NO'} | clang++: {'yes' if st['clang'] else 'no'} | "
++          f"AI: {'ready' if st['ai_ready'] else 'no API key (set GEMINI_API_KEY)'}"
++          f"{' [MOCK MODE]' if st['llm_mock'] else ''}")
++    print("Press Ctrl+C to stop.")
++    if not args.no_browser:
++        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
++    try:
++        srv.serve_forever()
++    except KeyboardInterrupt:
++        print("\nStopped.")
++    finally:
++        srv.server_close()
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/web/static/app.css b/src/web/static/app.css
+new file mode 100644
+index 0000000..b3ee79f
+--- /dev/null
++++ b/src/web/static/app.css
+@@ -0,0 +1,298 @@
++/* Green Compiler Studio — design tokens first, components after. */
++:root {
++  --bg: oklch(0.972 0.009 95);
++  --surface: oklch(0.992 0.005 95);
++  --sunken: oklch(0.948 0.011 95);
++  --ink: oklch(0.25 0.025 155);
++  --ink-2: oklch(0.44 0.022 155);
++  --ink-3: oklch(0.56 0.018 155);
++  --line: oklch(0.89 0.012 100);
++  --line-strong: oklch(0.80 0.016 120);
++  --accent: oklch(0.44 0.095 155);
++  --accent-ink: oklch(0.985 0.01 150);
++  --accent-soft: oklch(0.935 0.04 155);
++  --danger: oklch(0.5 0.17 28);
++  --danger-soft: oklch(0.945 0.035 28);
++  --warn: oklch(0.5 0.1 72);
++  --warn-soft: oklch(0.95 0.05 85);
++  --add-bg: oklch(0.94 0.05 150);
++  --del-bg: oklch(0.945 0.04 25);
++  --focus: oklch(0.55 0.15 255);
++  --shadow: 0 1px 2px oklch(0.3 0.03 150 / 0.08), 0 6px 20px oklch(0.3 0.03 150 / 0.06);
++
++  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
++  --r: 6px;
++  --font-ui: "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
++  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
++  --font-code: "Cascadia Code", "SF Mono", Consolas, Menlo, "DejaVu Sans Mono", monospace;
++  color-scheme: light;
++}
++:root[data-theme="dark"] { color-scheme: dark; }
++:root[data-theme="dark"], :root:not([data-theme="light"]) { }
++@media (prefers-color-scheme: dark) {
++  :root:not([data-theme="light"]) {
++    --bg: oklch(0.2 0.014 155); --surface: oklch(0.235 0.016 155); --sunken: oklch(0.18 0.013 155);
++    --ink: oklch(0.93 0.012 110); --ink-2: oklch(0.75 0.015 120); --ink-3: oklch(0.64 0.015 130);
++    --line: oklch(0.32 0.017 155); --line-strong: oklch(0.42 0.02 155);
++    --accent: oklch(0.74 0.12 155); --accent-ink: oklch(0.2 0.03 155); --accent-soft: oklch(0.3 0.05 155);
++    --danger: oklch(0.74 0.14 28); --danger-soft: oklch(0.3 0.05 28);
++    --warn: oklch(0.8 0.11 80); --warn-soft: oklch(0.31 0.05 80);
++    --add-bg: oklch(0.3 0.06 150); --del-bg: oklch(0.3 0.06 25);
++    --focus: oklch(0.75 0.13 255);
++    --shadow: 0 1px 2px #0006, 0 6px 20px #0004;
++    color-scheme: dark;
++  }
++}
++:root[data-theme="dark"] {
++  --bg: oklch(0.2 0.014 155); --surface: oklch(0.235 0.016 155); --sunken: oklch(0.18 0.013 155);
++  --ink: oklch(0.93 0.012 110); --ink-2: oklch(0.75 0.015 120); --ink-3: oklch(0.64 0.015 130);
++  --line: oklch(0.32 0.017 155); --line-strong: oklch(0.42 0.02 155);
++  --accent: oklch(0.74 0.12 155); --accent-ink: oklch(0.2 0.03 155); --accent-soft: oklch(0.3 0.05 155);
++  --danger: oklch(0.74 0.14 28); --danger-soft: oklch(0.3 0.05 28);
++  --warn: oklch(0.8 0.11 80); --warn-soft: oklch(0.31 0.05 80);
++  --add-bg: oklch(0.3 0.06 150); --del-bg: oklch(0.3 0.06 25);
++  --focus: oklch(0.75 0.13 255);
++  --shadow: 0 1px 2px #0006, 0 6px 20px #0004;
++}
++
++* { box-sizing: border-box; }
++html { -webkit-text-size-adjust: 100%; }
++body {
++  margin: 0; background: var(--bg); color: var(--ink);
++  font: 15px/1.5 var(--font-ui);
++}
++h1, h2, h3 { font-family: var(--font-display); font-weight: 600; margin: 0; letter-spacing: -0.01em; }
++h1 { font-size: 28px; line-height: 1.15; }
++h2 { font-size: 19px; line-height: 1.25; }
++h3 { font-size: 16px; line-height: 1.3; }
++p { margin: 0; }
++button, select, input, textarea { font: inherit; color: inherit; }
++:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 3px; }
++.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
++.skip { position: absolute; left: -999px; top: 8px; background: var(--ink); color: var(--bg); padding: 8px 12px; z-index: 10; border-radius: var(--r); }
++.skip:focus { left: 8px; }
++.muted { color: var(--ink-2); }
++.faint { color: var(--ink-3); }
++.mono { font-family: var(--font-code); font-size: 13px; }
++[hidden] { display: none !important; }
++
++/* ── Shell ─────────────────────────────────────────────────────────────── */
++.app { display: grid; grid-template-columns: 216px minmax(0, 1fr); min-height: 100vh; }
++.rail {
++  position: sticky; top: 0; height: 100vh; overflow-y: auto;
++  padding: var(--s5) var(--s3); border-right: 1px solid var(--line); background: var(--sunken);
++  display: flex; flex-direction: column; gap: var(--s5);
++}
++.brand { padding: 0 var(--s2); }
++.brand b { font-family: var(--font-display); font-size: 19px; display: block; line-height: 1.1; }
++.brand span { font-size: 12px; color: var(--ink-3); }
++.nav-group { display: flex; flex-direction: column; gap: 2px; }
++.nav-group h2 { font: 600 11px/1 var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-3); padding: 0 var(--s2) var(--s2); }
++.nav-link {
++  display: flex; align-items: center; justify-content: space-between; gap: var(--s2);
++  padding: 7px var(--s2); border-radius: var(--r); color: var(--ink-2); text-decoration: none;
++  border: 0; background: none; text-align: left; width: 100%; cursor: pointer;
++}
++.nav-link:hover { background: var(--line); color: var(--ink); }
++.nav-link[aria-current="page"] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent), var(--shadow); }
++.count { font-size: 12px; background: var(--accent); color: var(--accent-ink); border-radius: 99px; padding: 0 7px; min-width: 20px; text-align: center; }
++.rail-foot { margin-top: auto; padding: 0 var(--s2); display: flex; flex-direction: column; gap: var(--s2); font-size: 13px; }
++.content { min-width: 0; display: flex; flex-direction: column; }
++.topbar { display: flex; gap: var(--s2); flex-wrap: wrap; justify-content: flex-end; padding: var(--s3) var(--s6) 0; }
++#banner { padding: var(--s3) var(--s6) 0; }
++main { padding: var(--s5) var(--s6) var(--s7); outline: none; min-width: 0; }
++
++.chip {
++  display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; line-height: 1;
++  padding: 5px 9px; border-radius: 99px; background: var(--sunken); border: 1px solid var(--line); color: var(--ink-2); white-space: nowrap;
++}
++.chip i { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); display: inline-block; }
++.chip.ok { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 35%, var(--line)); background: var(--accent-soft); }
++.chip.ok i { background: var(--accent); }
++.chip.bad { color: var(--danger); border-color: color-mix(in oklch, var(--danger) 35%, var(--line)); background: var(--danger-soft); }
++.chip.bad i { background: var(--danger); }
++.chip.warn { color: var(--warn); border-color: color-mix(in oklch, var(--warn) 40%, var(--line)); background: var(--warn-soft); }
++.chip.warn i { background: var(--warn); }
++.chip.plain i { display: none; }
++
++.notice { padding: var(--s3) var(--s4); border-radius: var(--r); border: 1px solid var(--line); background: var(--sunken); }
++.notice.warn { background: var(--warn-soft); border-color: color-mix(in oklch, var(--warn) 40%, var(--line)); }
++.notice.bad { background: var(--danger-soft); border-color: color-mix(in oklch, var(--danger) 40%, var(--line)); }
++.notice.ok { background: var(--accent-soft); border-color: color-mix(in oklch, var(--accent) 35%, var(--line)); }
++.notice b { font-weight: 600; }
++
++/* ── Page header & buttons ─────────────────────────────────────────────── */
++.page-head { display: flex; flex-wrap: wrap; gap: var(--s4) var(--s5); align-items: flex-end; justify-content: space-between; margin-bottom: var(--s5); }
++.page-head p { color: var(--ink-2); max-width: 62ch; margin-top: var(--s2); }
++.actions { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
++.btn {
++  display: inline-flex; align-items: center; gap: var(--s2); cursor: pointer;
++  padding: 8px 14px; border-radius: var(--r); border: 1px solid var(--line-strong);
++  background: var(--surface); color: var(--ink); font-weight: 500; line-height: 1.2;
++}
++.btn:hover:not(:disabled) { border-color: var(--ink-3); background: var(--sunken); }
++.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
++.btn.primary:hover:not(:disabled) { background: color-mix(in oklch, var(--accent) 88%, black); border-color: transparent; }
++.btn.quiet { border-color: transparent; background: none; color: var(--ink-2); padding: 6px 8px; }
++.btn.quiet:hover:not(:disabled) { background: var(--sunken); color: var(--ink); }
++.btn.danger-quiet { border-color: transparent; background: none; color: var(--danger); }
++.btn:disabled { opacity: 0.5; cursor: not-allowed; }
++.btn[aria-busy="true"]::before { content: ""; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
++@keyframes spin { to { transform: rotate(360deg); } }
++select, input[type="search"], input[type="text"] {
++  padding: 7px 10px; border-radius: var(--r); border: 1px solid var(--line-strong); background: var(--surface);
++}
++
++/* ── Workspace layout ─────────────────────────────────────────────────── */
++.split { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: var(--s5); align-items: start; }
++.stack { display: flex; flex-direction: column; gap: var(--s5); min-width: 0; }
++.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
++.panel-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
++.panel-body { padding: var(--s4); }
++.panel-foot { padding: var(--s2) var(--s4); border-top: 1px solid var(--line); font-size: 12.5px; color: var(--ink-3); display: flex; justify-content: space-between; gap: var(--s3); flex-wrap: wrap; }
++
++.editor { display: grid; grid-template-columns: auto minmax(0, 1fr); height: clamp(320px, 56vh, 620px); background: var(--surface); border-radius: 0; font: 13px/20px var(--font-code); }
++.gutter { overflow: hidden; padding: 12px 0; text-align: right; background: var(--sunken); border-right: 1px solid var(--line); color: var(--ink-3); user-select: none; min-width: 44px; }
++.gutter span { display: block; padding: 0 10px 0 12px; height: 20px; position: relative; }
++.gutter span.err { color: var(--danger); font-weight: 700; background: var(--danger-soft); }
++.gutter span.err::before { content: "●"; position: absolute; left: 2px; font-size: 8px; line-height: 20px; }
++.gutter span.warn { color: var(--warn); font-weight: 700; background: var(--warn-soft); }
++.gutter span.warn::before { content: "▲"; position: absolute; left: 2px; font-size: 7px; line-height: 20px; }
++.code-area { border: 0; resize: none; padding: 12px 14px; margin: 0; background: transparent; color: var(--ink); font: inherit; white-space: pre; overflow: auto; tab-size: 4; outline: none; }
++.editor:focus-within { box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--focus) 60%, transparent); }
++
++.diag { border-top: 1px solid var(--line); }
++.diag:first-child { border-top: 0; }
++.diag-row { display: grid; grid-template-columns: auto 1fr auto; gap: var(--s3); align-items: start; padding: var(--s3) var(--s4); width: 100%; background: none; border: 0; text-align: left; cursor: pointer; }
++.diag-row:hover { background: var(--sunken); }
++.sev { font: 600 11px/1 var(--font-ui); text-transform: uppercase; letter-spacing: 0.06em; padding: 4px 6px; border-radius: 4px; margin-top: 2px; }
++.sev.error { background: var(--danger-soft); color: var(--danger); }
++.sev.warning { background: var(--warn-soft); color: var(--warn); }
++.sev.high, .sev.critical { background: var(--danger-soft); color: var(--danger); }
++.sev.medium { background: var(--warn-soft); color: var(--warn); }
++.sev.low, .sev.info { background: var(--sunken); color: var(--ink-2); }
++.diag-msg { overflow-wrap: anywhere; }
++.diag-meta { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: 4px; font-size: 12.5px; color: var(--ink-3); }
++.diag-detail { padding: 0 var(--s4) var(--s4) calc(var(--s4) + 64px); display: grid; gap: var(--s3); color: var(--ink-2); font-size: 14px; }
++.diag-detail pre { margin: 0; white-space: pre-wrap; font: inherit; }
++.diag-detail h4 { margin: 0 0 2px; font: 600 12px var(--font-ui); text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-3); }
++.empty { padding: var(--s6) var(--s4); text-align: center; color: var(--ink-2); }
++.empty b { display: block; font-family: var(--font-display); font-size: 17px; color: var(--ink); margin-bottom: 4px; }
++
++/* ── Diff ──────────────────────────────────────────────────────────────── */
++.diff { width: 100%; border-collapse: collapse; font: 13px/20px var(--font-code); }
++.diff td { padding: 0 var(--s2); vertical-align: top; }
++.diff .ln { width: 1%; text-align: right; color: var(--ink-3); user-select: none; padding: 0 6px; }
++.diff .sign { width: 1%; user-select: none; font-weight: 700; padding: 0 4px; }
++.diff .txt { white-space: pre-wrap; overflow-wrap: anywhere; }
++.diff tr.add { background: var(--add-bg); } .diff tr.add .sign { color: var(--accent); }
++.diff tr.del { background: var(--del-bg); } .diff tr.del .sign { color: var(--danger); }
++.diff-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
++.proposal { border-color: color-mix(in oklch, var(--accent) 45%, var(--line)); box-shadow: var(--shadow); }
++.steps { margin: 0 0 var(--s4); padding: 0; list-style: none; display: grid; gap: var(--s2); font-size: 14px; }
++.steps li { display: flex; gap: var(--s2); align-items: baseline; color: var(--ink-2); }
++.steps .ok { color: var(--accent); font-weight: 700; } .steps .no { color: var(--danger); font-weight: 700; }
++.decision { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s4); align-items: center; }
++
++/* ── Tabs & pipeline strip ─────────────────────────────────────────────── */
++.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 0 var(--s4); overflow-x: auto; }
++.tab { background: none; border: 0; padding: var(--s3) var(--s3); cursor: pointer; color: var(--ink-2); border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
++.tab:hover { color: var(--ink); }
++.tab[aria-selected="true"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
++.tabpanel { padding: var(--s4); min-width: 0; }
++.strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s3) var(--s4); margin-bottom: var(--s4); padding: var(--s3) var(--s4); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
++.stage { display: flex; align-items: center; gap: var(--s2); }
++.stage .dot { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; border: 2px solid var(--line-strong); color: var(--ink-3); }
++.stage.ok .dot { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
++.stage.error .dot { background: var(--danger); border-color: var(--danger); color: var(--surface); }
++.stage small { display: block; color: var(--ink-3); font-size: 12px; line-height: 1.1; }
++.stage b { font-weight: 600; line-height: 1.2; display: block; }
++
++table.data { width: 100%; border-collapse: collapse; font-size: 14px; }
++table.data th { text-align: left; font: 600 12px var(--font-ui); text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3); padding: 6px var(--s3); border-bottom: 1px solid var(--line-strong); position: sticky; top: 0; background: var(--surface); }
++table.data td { padding: 6px var(--s3); border-bottom: 1px solid var(--line); vertical-align: top; }
++table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
++.scroll { max-height: 440px; overflow: auto; border: 1px solid var(--line); border-radius: var(--r); }
++.tok { font: 12px var(--font-code); background: var(--sunken); padding: 2px 6px; border-radius: 4px; color: var(--ink-2); }
++
++.cols2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s4); }
++.ir { margin: 0; padding: var(--s3); background: var(--sunken); border-radius: var(--r); font: 13px/20px var(--font-code); overflow: auto; max-height: 420px; }
++.ir div { display: grid; grid-template-columns: 28px 1fr; padding: 0 4px; }
++.ir div span:first-child { color: var(--ink-3); user-select: none; }
++.ir .gone { background: var(--del-bg); text-decoration: line-through; text-decoration-color: color-mix(in oklch, var(--danger) 60%, transparent); }
++.ir .new { background: var(--add-bg); }
++.kv { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); margin: 0; }
++.kv div { display: flex; gap: var(--s2); align-items: baseline; }
++.kv dt { color: var(--ink-3); font-size: 13px; } .kv dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
++.out { font: 13px/1.5 var(--font-code); background: var(--sunken); border-radius: var(--r); padding: var(--s2) var(--s3); white-space: pre-wrap; min-height: 34px; }
++.section-title { font: 600 12px var(--font-ui); text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); margin: var(--s4) 0 var(--s2); }
++.section-title:first-child { margin-top: 0; }
++
++/* ── AST tree ──────────────────────────────────────────────────────────── */
++.tree, .tree ul { list-style: none; margin: 0; padding-left: var(--s4); }
++.tree { padding-left: 0; font: 13px/1.6 var(--font-code); }
++.tree li { position: relative; }
++.tree ul { border-left: 1px solid var(--line); margin-left: 7px; }
++.tree summary, .tree .leaf { cursor: pointer; padding: 1px 6px; border-radius: 4px; list-style: none; }
++.tree summary::-webkit-details-marker { display: none; }
++.tree summary::before { content: "▸"; display: inline-block; width: 14px; color: var(--ink-3); transition: transform 0.12s; }
++.tree details[open] > summary::before { transform: rotate(90deg); }
++.tree .leaf { padding-left: 20px; }
++.tree summary:hover, .tree .leaf:hover { background: var(--sunken); }
++.tree .ty { font-weight: 700; color: var(--accent); }
++.tree .role { color: var(--ink-3); }
++.tree .at { color: var(--ink-3); }
++.tree .attr { color: var(--ink-2); }
++.tree .hit { background: var(--warn-soft); }
++
++/* ── AI + results ──────────────────────────────────────────────────────── */
++.phase { display: grid; grid-template-columns: 150px 1fr; gap: var(--s4); padding: var(--s3) 0; border-top: 1px solid var(--line); }
++.phase:first-of-type { border-top: 0; }
++.phase h3 { font-size: 15px; } .phase .sub { font-size: 12.5px; color: var(--ink-3); }
++.finding { padding: var(--s3) 0; border-top: 1px solid var(--line); display: grid; gap: 4px; }
++.finding:first-child { border-top: 0; }
++.linkish { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
++
++.bars { display: grid; gap: var(--s3); margin: var(--s4) 0 var(--s2); }
++.bar-row { display: grid; grid-template-columns: 170px 1fr 70px; gap: var(--s3); align-items: center; }
++.bar-track { height: 18px; background: var(--sunken); border-radius: 4px; overflow: hidden; border: 1px solid var(--line); }
++.bar-fill { height: 100%; background: var(--ink-3); } .bar-fill.ai { background: var(--accent); }
++.bar-val { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
++.lede { font-family: var(--font-display); font-size: 20px; line-height: 1.4; max-width: 60ch; }
++.mark { font-weight: 700; } .mark.y { color: var(--accent); } .mark.n { color: var(--danger); } .mark.c { color: var(--ink-3); }
++
++/* ── Architecture ──────────────────────────────────────────────────────── */
++.diagram { width: 100%; height: auto; display: block; }
++.diagram .band { fill: var(--sunken); stroke: var(--line); }
++.diagram .band-title { font: 600 11px var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; fill: var(--ink-3); }
++.diagram .box { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; }
++.diagram .box.new { stroke: var(--accent); stroke-width: 1.8; fill: color-mix(in oklch, var(--accent-soft) 70%, var(--surface)); }
++.diagram .t1 { font: 600 13px var(--font-ui); fill: var(--ink); }
++.diagram .t2 { font: 11.5px var(--font-ui); fill: var(--ink-2); }
++.diagram .tag { font: 700 9.5px var(--font-ui); letter-spacing: 0.08em; fill: var(--accent); }
++.diagram .edge { fill: none; stroke: var(--ink-3); stroke-width: 1.4; }
++.diagram .edge.dash { stroke-dasharray: 5 4; stroke: var(--accent); }
++.diagram .elabel { font: italic 11.5px var(--font-ui); fill: var(--accent); }
++.legend { display: flex; gap: var(--s5); flex-wrap: wrap; font-size: 13px; color: var(--ink-2); margin-top: var(--s3); }
++.legend i { display: inline-block; width: 14px; height: 14px; border-radius: 3px; border: 1.2px solid var(--line-strong); vertical-align: -2px; margin-right: 6px; background: var(--surface); }
++.legend i.new { border: 1.8px solid var(--accent); background: var(--accent-soft); }
++.legend i.dash { width: 24px; height: 0; border: 0; border-top: 2px dashed var(--accent); border-radius: 0; background: none; vertical-align: 3px; }
++.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r); overflow: hidden; }
++.seg button { border: 0; background: var(--surface); padding: 7px 14px; cursor: pointer; border-right: 1px solid var(--line-strong); }
++.seg button:last-child { border-right: 0; }
++.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
++
++.change { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
++.change + .change { margin-top: var(--s3); }
++.change-head { display: grid; grid-template-columns: 1fr auto; gap: var(--s3); padding: var(--s3) var(--s4); align-items: center; }
++.change-body { padding: 0 var(--s4) var(--s4); }
++
++@media (max-width: 1080px) { .split { grid-template-columns: minmax(0, 1fr); } .cols2 { grid-template-columns: minmax(0, 1fr); } }
++@media (max-width: 860px) {
++  .app { grid-template-columns: minmax(0, 1fr); }
++  .rail { position: static; height: auto; flex-direction: row; flex-wrap: wrap; gap: var(--s3) var(--s5); border-right: 0; border-bottom: 1px solid var(--line); padding: var(--s3) var(--s4); }
++  .nav-group { flex-direction: row; flex-wrap: wrap; } .nav-group h2 { display: none; } .rail-foot { margin: 0; flex-direction: row; }
++  main, .topbar, #banner { padding-left: var(--s4); padding-right: var(--s4); }
++  .phase { grid-template-columns: 1fr; gap: var(--s2); } .bar-row { grid-template-columns: 1fr 70px; } .bar-row .bar-track { grid-column: 1 / -1; grid-row: 2; }
++}
++@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+diff --git a/src/web/static/core.js b/src/web/static/core.js
+new file mode 100644
+index 0000000..3b4c3e7
+--- /dev/null
++++ b/src/web/static/core.js
+@@ -0,0 +1,221 @@
++'use strict';
++/* core.js — DOM helpers, API client, editor, diff view, tabs, shared state. No dependencies. */
++
++const $ = (sel, root = document) => root.querySelector(sel);
++
++/* append/prepend/replaceChildren would print "false", "null" or "[object ...]" for conditional children.
++   Make them behave like el(): flatten arrays and skip null / undefined / false. */
++(function () {
++  const clean = (kids) => kids.flat(Infinity).filter(k => k != null && k !== false);
++  for (const m of ['append', 'prepend', 'replaceChildren']) {
++    const orig = Element.prototype[m];
++    Element.prototype[m] = function (...kids) { return orig.apply(this, clean(kids)); };
++  }
++})();
++
++/** Build a DOM node. Text is always inserted as text (never HTML), so code and diagnostics cannot inject markup. */
++function el(tag, props, ...kids) {
++  const n = document.createElement(tag);
++  if (props) {
++    for (const [k, v] of Object.entries(props)) {
++      if (v == null || v === false) continue;
++      if (k === 'class') n.className = v;
++      else if (k === 'text') n.textContent = v;
++      else if (k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2).toLowerCase(), v);
++      else if (v === true) n.setAttribute(k, '');
++      else n.setAttribute(k, v);
++    }
++  }
++  for (const c of kids.flat(Infinity)) {
++    if (c == null || c === false) continue;
++    n.append(c.nodeType ? c : document.createTextNode(String(c)));
++  }
++  return n;
++}
++const SVGNS = 'http://www.w3.org/2000/svg';
++function svg(tag, attrs, ...kids) {
++  const n = document.createElementNS(SVGNS, tag);
++  for (const [k, v] of Object.entries(attrs || {})) if (v != null) n.setAttribute(k, v);
++  for (const c of kids.flat(Infinity)) if (c != null) n.append(c.nodeType ? c : document.createTextNode(String(c)));
++  return n;
++}
++
++function announce(msg) { const l = $('#live'); if (l) { l.textContent = ''; setTimeout(() => { l.textContent = msg; }, 30); } }
++
++/* ── API ─────────────────────────────────────────────────────────────── */
++async function call(path, body) {
++  const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
++  let r;
++  try { r = await fetch(path, opt); } catch (e) { throw new Error('Cannot reach the local server. Is it still running?'); }
++  let d;
++  try { d = await r.json(); } catch (e) { throw new Error('The server sent an unexpected response.'); }
++  if (!r.ok) throw new Error(d.error || ('Request failed (' + r.status + ')'));
++  return d;
++}
++
++/** Disable buttons and show a busy state while an async job runs. Always restores them. */
++async function busy(buttons, fn) {
++  const list = [].concat(buttons).filter(Boolean);
++  const before = list.map(b => b.disabled);       // restore exactly what each button was
++  list.forEach(b => { b.disabled = true; });
++  const main = list[0];
++  if (main) main.setAttribute('aria-busy', 'true');
++  try { return await fn(); }
++  finally {
++    list.forEach((b, i) => { b.disabled = before[i]; });
++    if (main) main.removeAttribute('aria-busy');
++  }
++}
++
++const notice = (kind, ...kids) => el('div', { class: 'notice ' + kind, role: kind === 'bad' ? 'alert' : 'status' }, ...kids);
++
++/* ── Persistent-ish state ────────────────────────────────────────────── */
++const store = {
++  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
++  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable: fine */ } },
++};
++
++const state = {
++  status: null,
++  samples: [],
++  cpp: { code: '', result: null, pending: null, lastCheckedCode: null },
++  minic: { code: '', pipeline: null, pipelineFor: null },
++  proposals: store.get('proposals', []),
++  nextId: store.get('nextId', 1),
++};
++function saveProposals() {
++  store.set('proposals', state.proposals.slice(-30));
++  store.set('nextId', state.nextId);
++}
++
++/* ── Code editor ─────────────────────────────────────────────────────── */
++function Editor({ value = '', label, onChange, onRun }) {
++  const gutter = el('div', { class: 'gutter', 'aria-hidden': 'true' });
++  const ta = el('textarea', {
++    class: 'code-area', spellcheck: 'false', wrap: 'off', autocapitalize: 'off',
++    autocomplete: 'off', autocorrect: 'off', 'aria-label': label,
++  });
++  ta.value = value;
++  const root = el('div', { class: 'editor' }, gutter, ta);
++  let marks = {};
++  let tabEscape = false;
++
++  function paint() {
++    const n = ta.value.split('\n').length;
++    gutter.replaceChildren();
++    for (let i = 1; i <= n; i++) gutter.append(el('span', { class: marks[i] || '', text: String(i) }));
++    gutter.scrollTop = ta.scrollTop;
++  }
++  ta.addEventListener('input', () => { paint(); onChange && onChange(ta.value); });
++  ta.addEventListener('scroll', () => { gutter.scrollTop = ta.scrollTop; });
++  ta.addEventListener('keydown', (e) => {
++    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); onRun && onRun(); return; }
++    if (e.key === 'Escape') { tabEscape = true; return; }
++    if (e.key === 'Tab' && !e.shiftKey && !tabEscape) {
++      e.preventDefault();
++      const s = ta.selectionStart, t = ta.selectionEnd;
++      ta.setRangeText('    ', s, t, 'end');
++      ta.dispatchEvent(new Event('input'));
++    }
++    if (e.key !== 'Tab' && e.key !== 'Escape') tabEscape = false;
++  });
++  paint();
++
++  return {
++    root, textarea: ta,
++    get: () => ta.value,
++    set(v) { ta.value = v; paint(); onChange && onChange(v); },
++    mark(map) { marks = map || {}; paint(); },
++    goto(line) {
++      const lines = ta.value.split('\n');
++      if (line < 1 || line > lines.length) return;
++      let start = 0;
++      for (let i = 0; i < line - 1; i++) start += lines[i].length + 1;
++      ta.focus();
++      ta.setSelectionRange(start, start + lines[line - 1].length);
++      ta.scrollTop = Math.max(0, (line - 4) * 20);
++    },
++  };
++}
++
++/* ── Diff view ───────────────────────────────────────────────────────── */
++function DiffView(lines) {
++  if (!lines || !lines.some(l => l.kind !== ' ')) return el('p', { class: 'muted', text: 'No differences.' });
++  const rows = lines.map(l => el('tr', { class: l.kind === '+' ? 'add' : l.kind === '-' ? 'del' : '' },
++    el('td', { class: 'ln', text: l.old ?? '' }),
++    el('td', { class: 'ln', text: l.new ?? '' }),
++    el('td', { class: 'sign', text: l.kind === ' ' ? '' : l.kind, 'aria-label': l.kind === '+' ? 'added' : l.kind === '-' ? 'removed' : 'unchanged' }),
++    el('td', { class: 'txt', text: l.text }),
++  ));
++  return el('div', { class: 'diff-wrap', role: 'region', 'aria-label': 'Changes', tabindex: '0' }, el('table', { class: 'diff' }, el('tbody', null, rows)));
++}
++const diffStats = (lines) => ({
++  add: (lines || []).filter(l => l.kind === '+').length,
++  del: (lines || []).filter(l => l.kind === '-').length,
++});
++
++/* ── Tabs (keyboard accessible) ──────────────────────────────────────── */
++function Tabs(items, initial) {
++  const list = el('div', { class: 'tabs', role: 'tablist' });
++  const panel = el('div', { class: 'tabpanel', role: 'tabpanel', tabindex: '0' });
++  let current = initial || items[0].id;
++  const btns = {};
++  function select(id, focus) {
++    current = id;
++    for (const it of items) btns[it.id].setAttribute('aria-selected', String(it.id === id)), btns[it.id].tabIndex = it.id === id ? 0 : -1;
++    const it = items.find(x => x.id === id);
++    panel.replaceChildren(it.render());
++    panel.setAttribute('aria-labelledby', 'tab-' + id);
++    if (focus) btns[id].focus();
++  }
++  items.forEach((it, i) => {
++    const b = el('button', { class: 'tab', role: 'tab', id: 'tab-' + it.id, onClick: () => select(it.id) }, it.label);
++    b.addEventListener('keydown', (e) => {
++      const k = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
++      if (k) { e.preventDefault(); select(items[(i + k + items.length) % items.length].id, true); }
++    });
++    btns[it.id] = b; list.append(b);
++  });
++  select(current);
++  return { list, panel, select, refresh: () => select(current), get current() { return current; } };
++}
++
++/* ── Small shared pieces ─────────────────────────────────────────────── */
++const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : /(ch|s|x)$/.test(w) ? 'es' : 's');
++const pct = (v) => (v == null ? '—' : v.toFixed(1) + '%');
++function timeLabel(ts) { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
++
++function SamplePicker(language, onPick) {
++  const sel = el('select', { 'aria-label': 'Load an example' },
++    el('option', { value: '', text: 'Load an example…' }),
++    state.samples.filter(s => s.language === language).map((s, i) => el('option', { value: String(i), text: s.name })));
++  sel.addEventListener('change', () => {
++    if (sel.value === '') return;
++    onPick(state.samples.filter(s => s.language === language)[Number(sel.value)]);
++    sel.value = '';
++  });
++  return sel;
++}
++
++/** LCS line diff for short instruction lists. Returns {removed:Set(indices in a), added:Set(indices in b)}. */
++function lcsMarks(a, b) {
++  const n = a.length, m = b.length;
++  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
++  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
++    dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
++  const removed = new Set(), added = new Set();
++  let i = 0, j = 0;
++  while (i < n && j < m) {
++    if (a[i] === b[j]) { i++; j++; }
++    else if (dp[i + 1][j] >= dp[i][j + 1]) removed.add(i++);
++    else added.add(j++);
++  }
++  while (i < n) removed.add(i++);
++  while (j < m) added.add(j++);
++  return { removed, added };
++}
++
++function IRList(texts, marks, cls) {
++  return el('pre', { class: 'ir', tabindex: '0', 'aria-label': 'Instruction list' },
++    texts.map((t, i) => el('div', { class: marks && marks.has(i) ? cls : '' }, el('span', { text: String(i) }), el('span', { text: t }))));
++}
+diff --git a/src/web/static/index.html b/src/web/static/index.html
+new file mode 100644
+index 0000000..e7c0fc9
+--- /dev/null
++++ b/src/web/static/index.html
+@@ -0,0 +1,26 @@
++<!doctype html>
++<html lang="en">
++<head>
++  <meta charset="utf-8">
++  <meta name="viewport" content="width=device-width, initial-scale=1">
++  <title>Green Compiler Studio</title>
++  <link rel="stylesheet" href="app.css">
++</head>
++<body>
++  <a class="skip" href="#main">Skip to content</a>
++  <div class="app">
++    <nav class="rail" id="rail" aria-label="Main"></nav>
++    <div class="content">
++      <div class="topbar" id="topbar" aria-label="Environment status"></div>
++      <div id="banner"></div>
++      <main id="main" tabindex="-1"></main>
++    </div>
++  </div>
++  <div id="live" class="sr" aria-live="polite"></div>
++  <script src="core.js"></script>
++  <script src="pages-cpp.js"></script>
++  <script src="pages-compiler.js"></script>
++  <script src="pages-evidence.js"></script>
++  <script src="main.js"></script>
++</body>
++</html>
+diff --git a/src/web/static/main.js b/src/web/static/main.js
+new file mode 100644
+index 0000000..d43e731
+--- /dev/null
++++ b/src/web/static/main.js
+@@ -0,0 +1,91 @@
++'use strict';
++/* main.js — navigation, router, status chips, theme, boot. */
++
++const ROUTES = [
++  { group: 'Work', items: [
++    { id: 'workspace', label: 'C++ workspace', title: 'C++ workspace', render: pageWorkspace },
++    { id: 'changes', label: 'Changes', title: 'Changes', render: pageChanges, badge: true },
++  ] },
++  { group: 'Compiler', items: [
++    { id: 'pipeline', label: 'MiniC pipeline', title: 'MiniC pipeline', render: pagePipeline },
++    { id: 'ast', label: 'Syntax tree', title: 'Syntax tree', render: pageAst },
++    { id: 'ai', label: 'AI insights', title: 'AI insights', render: pageAI },
++  ] },
++  { group: 'Evidence', items: [
++    { id: 'benchmark', label: 'Benchmark', title: 'Benchmark', render: pageBenchmark },
++    { id: 'architecture', label: 'Architecture', title: 'Architecture', render: pageArchitecture },
++  ] },
++];
++const FLAT = ROUTES.flatMap(g => g.items);
++
++function buildRail() {
++  const rail = $('#rail');
++  rail.replaceChildren(
++    el('div', { class: 'brand' }, el('b', { text: 'Green Compiler Studio' }), el('span', { text: 'self-healing · AI-assisted' })),
++    ROUTES.map(g => el('div', { class: 'nav-group' }, el('h2', { text: g.group }),
++      g.items.map(it => el('a', { class: 'nav-link', href: '#/' + it.id, 'data-route': it.id },
++        el('span', { text: it.label }),
++        it.badge ? el('span', { class: 'count', id: 'nav-count', hidden: true, 'aria-label': 'awaiting decision' }) : null)))),
++    el('div', { class: 'rail-foot' }, themeButton()));
++  updateNavCount();
++}
++
++function themeButton() {
++  const modes = ['auto', 'light', 'dark'];
++  let mode = store.get('theme', 'auto');
++  const btn = el('button', { class: 'btn quiet', style: 'justify-content:flex-start' });
++  const apply = () => {
++    if (mode === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', mode);
++    btn.textContent = 'Theme: ' + mode;
++  };
++  btn.addEventListener('click', () => { mode = modes[(modes.indexOf(mode) + 1) % modes.length]; store.set('theme', mode); apply(); });
++  apply();
++  return btn;
++}
++
++function buildStatus() {
++  const st = state.status;
++  const chip = (cls, text) => el('span', { class: 'chip ' + cls }, el('i'), text);
++  $('#topbar').replaceChildren(
++    chip(st.gxx ? 'ok' : 'bad', st.gxx ? 'g++ found' : 'g++ missing'),
++    chip(st.clang ? 'ok' : 'warn', st.clang ? 'clang++ found' : 'clang++ missing (C++ tree off)'),
++    chip(st.llm_mock ? 'warn' : st.ai_ready ? 'ok' : 'warn', st.llm_mock ? 'AI: mock mode' : st.ai_ready ? 'AI: Gemini ready' : 'AI: no API key'));
++  const banner = $('#banner');
++  banner.replaceChildren();
++  if (st.llm_mock) banner.append(notice('warn', el('b', { text: 'Mock mode is on. ' }), 'AI answers are canned examples, not real model output. Unset LLM_MOCK for real results.'));
++  if (!st.gxx) banner.append(notice('bad', el('b', { text: 'g++ was not found. ' }), 'Install a C++ toolchain and restart; C++ checking and healing need it.'));
++}
++
++function route() {
++  const id = (location.hash.replace(/^#\//, '') || 'workspace');
++  const r = FLAT.find(x => x.id === id) || FLAT[0];
++  document.querySelectorAll('.nav-link').forEach(a => {
++    if (a.dataset.route === r.id) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
++  });
++  const main = $('#main');
++  main.replaceChildren();
++  document.title = r.title + ' · Green Compiler Studio';
++  try { r.render(main); }
++  catch (e) { main.replaceChildren(notice('bad', el('b', { text: 'This page failed to load. ' }), e.message)); console.error(e); }
++  main.focus({ preventScroll: true });
++  window.scrollTo(0, 0);
++}
++
++async function boot() {
++  buildRail();
++  try {
++    const [status, samples] = await Promise.all([call('/api/status'), call('/api/samples')]);
++    state.status = status; state.samples = samples.samples;
++  } catch (e) {
++    $('#main').replaceChildren(notice('bad', el('b', { text: 'Could not start. ' }), e.message));
++    return;
++  }
++  const firstCpp = state.samples.find(s => s.language === 'cpp');
++  const firstMini = state.samples.find(s => s.language === 'minic');
++  if (!state.cpp.code && firstCpp) state.cpp.code = firstCpp.code;
++  if (!state.minic.code && firstMini) state.minic.code = firstMini.code;
++  buildStatus();
++  window.addEventListener('hashchange', route);
++  route();
++}
++boot();
+diff --git a/src/web/static/pages-compiler.js b/src/web/static/pages-compiler.js
+new file mode 100644
+index 0000000..bd29407
+--- /dev/null
++++ b/src/web/static/pages-compiler.js
+@@ -0,0 +1,359 @@
++'use strict';
++/* pages-compiler.js — MiniC pipeline, AST explorer, AI insights. */
++
++function minicEditor(onRun) {
++  return Editor({ value: state.minic.code, label: 'MiniC source code', onChange: (v) => { state.minic.code = v; }, onRun });
++}
++
++function minicMarks(d) {
++  const m = {};
++  (d.lex_errors || []).forEach(e => { m[e.line] = 'err'; });
++  (d.parse_errors || []).forEach(e => { m[e.line] = 'err'; });
++  (d.semantic || []).forEach(e => { if (e.severity === 'error') m[e.line] = 'err'; else if (!m[e.line]) m[e.line] = 'warn'; });
++  return m;
++}
++
++async function ensurePipeline(code) {
++  const s = state.minic;
++  if (s.pipeline && s.pipelineFor === code) return s.pipeline;
++  const d = await call('/api/minic/pipeline', { code });
++  s.pipeline = d; s.pipelineFor = code;
++  return d;
++}
++
++/* ── Pipeline ────────────────────────────────────────────────────────── */
++function stageModel(d) {
++  const reached = d.stage_reached;
++  const semErrors = (d.semantic || []).filter(x => x.severity === 'error').length;
++  const hasSem = ['semantic', 'ir', 'executed'].includes(reached);
++  const hasIR = ['ir', 'executed'].includes(reached);
++  const irFail = d.runtime_error && String(d.runtime_error).startsWith('IR generation');
++  return [
++    { label: 'Lex', status: d.lex_errors.length ? 'error' : 'ok', note: d.lex_errors.length ? plural(d.lex_errors.length, 'error') : plural(Math.max(0, d.tokens.length - 1), 'token') },
++    { label: 'Parse', status: d.parse_errors.length ? 'error' : 'ok', note: d.parse_errors.length ? plural(d.parse_errors.length, 'error') : 'AST built' },
++    { label: 'Semantic', status: !hasSem ? 'skip' : semErrors ? 'error' : 'ok', note: !hasSem ? 'not reached' : semErrors ? plural(semErrors, 'error') : 'types & scopes ok' },
++    { label: 'IR + optimize', status: irFail ? 'error' : hasIR ? 'ok' : 'skip', note: hasIR ? d.ir.length + ' → ' + d.optimized_ir.length + ' instr' : 'not reached' },
++    { label: 'Run', status: reached === 'executed' ? 'ok' : (d.runtime_error && !irFail) ? 'error' : 'skip', note: reached === 'executed' ? plural((d.output || []).length, 'output line') : (d.runtime_error && !irFail) ? 'runtime error' : 'not reached' },
++  ];
++}
++
++function Strip(d) {
++  return el('ol', { class: 'strip', 'aria-label': 'Compiler phases', style: 'list-style:none;margin-left:0;padding-left:16px' },
++    stageModel(d).map(st => el('li', { class: 'stage ' + st.status },
++      el('span', { class: 'dot', 'aria-hidden': 'true', text: st.status === 'ok' ? '✓' : st.status === 'error' ? '✕' : '–' }),
++      el('span', null, el('b', { text: st.label }), el('small', { text: st.note }),
++        el('span', { class: 'sr', text: st.status === 'ok' ? 'passed' : st.status === 'error' ? 'failed' : 'not reached' })))));
++}
++
++const NOT_REACHED = (what) => el('p', { class: 'muted', text: 'Not reached — ' + what });
++
++function ErrorList(items, ed, kind) {
++  return el('div', null, items.map(e => el('div', { class: 'finding' },
++    el('div', null, el('span', { class: 'sev ' + (e.severity || 'error'), text: e.severity || 'error' }), ' ',
++      el('button', { class: 'linkish', text: 'line ' + e.line + ':' + e.column, onClick: () => ed.goto(e.line) })),
++    el('div', { text: e.message }),
++    e.expected ? el('div', { class: 'faint', text: 'expected: ' + e.expected }) : null)));
++}
++
++function pagePipeline(root) {
++  const s = state.minic;
++  const ed = minicEditor(() => run());
++  const btn = el('button', { class: 'btn primary', onClick: () => run() }, 'Compile & run');
++  const out = el('div');
++
++  function render() {
++    const d = s.pipeline;
++    out.replaceChildren();
++    if (!d) {
++      out.append(el('div', { class: 'panel' }, el('div', { class: 'empty' }, el('b', { text: 'Run the pipeline to see each phase' }),
++        'Press Compile & run (Ctrl+Enter). You will see the tokens, the syntax tree, the symbol table, the intermediate code before and after optimization, and the program output.')));
++      return;
++    }
++    if (s.pipelineFor !== ed.get()) out.append(notice('warn', 'The code changed since this run. Press Compile & run to refresh.'));
++    out.append(Strip(d));
++    const semErrs = d.semantic.filter(x => x.severity === 'error');
++    const initial = d.parse_errors.length || d.lex_errors.length ? 'syntax' : semErrs.length ? 'semantic' : d.stage_reached === 'executed' ? 'ir' : 'tokens';
++    const tabs = Tabs([
++      { id: 'tokens', label: 'Tokens', render: () => tokensView(d) },
++      { id: 'syntax', label: 'Syntax', render: () => syntaxView(d, ed) },
++      { id: 'semantic', label: 'Semantics & symbols', render: () => semanticView(d, ed) },
++      { id: 'ir', label: 'IR & output', render: () => irView(d) },
++    ], initial);
++    out.append(el('div', { class: 'panel' }, tabs.list, tabs.panel));
++  }
++
++  async function run() {
++    const code = ed.get();
++    if (!code.trim()) { out.replaceChildren(notice('warn', 'Write or load some MiniC code first.')); return; }
++    await busy([btn], async () => {
++      try {
++        const d = await call('/api/minic/pipeline', { code });
++        s.pipeline = d; s.pipelineFor = code; ed.mark(minicMarks(d)); render();
++        announce('Pipeline finished: ' + d.stage_reached);
++      } catch (e) { out.replaceChildren(notice('bad', e.message)); }
++    });
++  }
++
++  root.append(
++    el('div', { class: 'page-head' },
++      el('div', null, el('h1', { text: 'MiniC pipeline' }),
++        el('p', { text: 'A small C-like language compiled by this project’s own front end: every phase below is code in src/core, not a wrapper around g++.' })),
++      el('div', { class: 'actions' }, SamplePicker('minic', (smp) => { ed.set(smp.code); s.pipeline = null; ed.mark({}); render(); }), btn)),
++    el('div', { class: 'split' },
++      el('div', { class: 'panel' }, el('div', { class: 'panel-head' }, el('h2', { text: 'program.minic' })), ed.root,
++        el('div', { class: 'panel-foot' }, el('span', { text: 'Ctrl+Enter to run' }), el('span', { text: 'Esc then Tab leaves the editor' }))),
++      out));
++  if (s.pipeline) ed.mark(minicMarks(s.pipeline));
++  render();
++}
++
++function tokensView(d) {
++  const toks = d.tokens.filter(t => t.type !== 'EOF');
++  const shown = toks.slice(0, 600);
++  return el('div', null,
++    el('p', { class: 'muted', style: 'margin-bottom:12px', text: 'The lexer turns characters into tokens: the smallest meaningful pieces.' }),
++    el('div', { class: 'scroll' }, el('table', { class: 'data' },
++      el('thead', null, el('tr', null, el('th', { text: 'Type' }), el('th', { text: 'Text' }), el('th', { class: 'num', text: 'Line:col' }))),
++      el('tbody', null, shown.map(t => el('tr', null, el('td', null, el('span', { class: 'tok', text: t.type })), el('td', { class: 'mono', text: t.lexeme }), el('td', { class: 'num faint', text: t.line + ':' + t.column })))))),
++    toks.length > shown.length ? el('p', { class: 'faint', style: 'margin-top:8px', text: 'Showing the first ' + shown.length + ' of ' + toks.length + ' tokens.' }) : null);
++}
++
++function syntaxView(d, ed) {
++  const errs = [...d.lex_errors.map(e => ({ ...e, severity: 'error' })), ...d.parse_errors.map(e => ({ ...e, severity: 'error' }))];
++  if (errs.length) return el('div', null, el('p', { class: 'muted', style: 'margin-bottom:8px', text: 'The parser found these problems and kept going to report as many as it could.' }), ErrorList(errs, ed));
++  const decls = (d.ast && d.ast.children || []).length;
++  return el('div', null, notice('ok', el('b', { text: 'Parsed successfully. ' }), plural(decls, 'top-level declaration') + ' found.'),
++    el('p', { style: 'margin-top:12px' }, el('a', { class: 'linkish', href: '#/ast', text: 'Explore the syntax tree →' })));
++}
++
++function semanticView(d, ed) {
++  if (!['semantic', 'ir', 'executed'].includes(d.stage_reached)) return NOT_REACHED('fix the syntax errors first.');
++  return el('div', null,
++    el('div', { class: 'section-title', text: 'Checks' }),
++    d.semantic.length ? ErrorList(d.semantic, ed) : notice('ok', 'No type, scope, or return-path problems found.'),
++    el('div', { class: 'section-title', text: 'Symbol table' }),
++    el('div', { class: 'scroll' }, el('table', { class: 'data' },
++      el('thead', null, el('tr', null, ['Name', 'Kind', 'Type', 'Scope', 'Line'].map(h => el('th', { text: h })))),
++      el('tbody', null, d.symbols.map(y => el('tr', null,
++        el('td', { class: 'mono', text: y.name + (y.detail || '') }), el('td', { text: y.kind }), el('td', { class: 'mono', text: y.type }), el('td', { class: 'mono', text: y.scope }), el('td', { class: 'num', text: y.line })))))));
++}
++
++function irView(d) {
++  if (!['ir', 'executed'].includes(d.stage_reached)) return NOT_REACHED(d.runtime_error || 'fix the earlier errors first.');
++  const a = d.ir.map(x => x.text), b = d.optimized_ir.map(x => x.text);
++  const m = lcsMarks(a, b);
++  const st = d.opt_stats || {};
++  const names = { constant_propagation: 'Constant propagation', constant_folding: 'Constant folding', algebraic_simplification: 'Algebraic simplification', common_subexpression_elimination: 'Common subexpressions', dead_code_elimination: 'Dead code removed' };
++  return el('div', null,
++    el('p', { class: 'muted', style: 'margin-bottom:12px', text: 'Three-address code is the compiler’s internal form. Five optimizer passes rewrite it, and the interpreter checks the program still behaves the same.' }),
++    el('dl', { class: 'kv' }, Object.keys(names).map(k => el('div', null, el('dt', { text: names[k] }), el('dd', { text: String(st[k] ?? 0) })))),
++    el('div', { class: 'cols2', style: 'margin-top:16px' },
++      el('div', null, el('div', { class: 'section-title', text: 'Before · ' + a.length + ' instructions' }), IRList(a, m.removed, 'gone')),
++      el('div', null, el('div', { class: 'section-title', text: 'After · ' + b.length + ' instructions' }), IRList(b, m.added, 'new'))),
++    d.runtime_error ? notice('bad', el('b', { text: 'Runtime error: ' }), d.runtime_error) : el('div', null,
++      el('div', { class: 'section-title', text: 'Program output' }),
++      el('div', { class: 'cols2' },
++        el('div', null, el('div', { class: 'faint', text: 'Before optimization' }), el('div', { class: 'out', text: (d.output || []).join('\n') || '(no output)' })),
++        el('div', null, el('div', { class: 'faint', text: 'After optimization' }), el('div', { class: 'out', text: (d.optimized_output || []).join('\n') || '(no output)' }))),
++      el('p', { style: 'margin-top:12px' }, d.equivalent
++        ? el('span', { class: 'chip ok' }, el('i'), 'Same output before and after')
++        : el('span', { class: 'chip bad' }, el('i'), 'Outputs differ — optimizer bug'))));
++}
++
++/* ── AST explorer ────────────────────────────────────────────────────── */
++function normMini(n, role) {
++  const attrs = Object.entries(n.attrs || {}).map(([k, v]) => k + '=' + JSON.stringify(v)).join('  ');
++  return { role, label: n.type, meta: attrs, pos: n.line ? n.line + ':' + n.column : '', children: (n.children || []).map(c => normMini(c.node, c.role)) };
++}
++function normClang(n) {
++  return { role: '', label: n.type, meta: n.details || '', pos: '', children: (n.children || []).map(normClang) };
++}
++
++function TreeView(roots) {
++  const items = [];
++  function build(n, depth) {
++    const text = el('span', null,
++      n.role ? el('span', { class: 'role', text: n.role + ': ' }) : null,
++      el('span', { class: 'ty', text: n.label }), ' ',
++      n.meta ? el('span', { class: 'attr', text: n.meta }) : null,
++      n.pos ? el('span', { class: 'at', text: '  @' + n.pos }) : null);
++    const li = el('li');
++    let head;
++    if (n.children.length) {
++      head = el('summary', null, text);
++      const det = el('details', { open: depth < 2 }, head, el('ul', null, n.children.map(c => build(c, depth + 1))));
++      li.append(det); li._det = det;
++    } else { head = el('div', { class: 'leaf' }, text); li.append(head); }
++    li._text = ((n.role || '') + ' ' + n.label + ' ' + n.meta).toLowerCase();
++    li._head = head; li._kids = () => [...li.querySelectorAll(':scope > details > ul > li')];
++    items.push(li);
++    return li;
++  }
++  const ul = el('ul', { class: 'tree', role: 'tree' }, roots.map(r => build(r, 0)));
++  const none = el('p', { class: 'muted', hidden: true, text: 'No nodes match that filter.' });
++  function filter(q) {
++    q = q.trim().toLowerCase();
++    let hits = 0;
++    const visit = (li) => {
++      const own = !!q && li._text.includes(q);
++      if (own) hits++;
++      let child = false;
++      li._kids().forEach(k => { if (visit(k)) child = true; });
++      li.hidden = !!q && !own && !child;
++      li._head.classList.toggle('hit', own);
++      if (li._det && q && child) li._det.open = true;
++      return own || child;
++    };
++    [...ul.children].forEach(visit);
++    none.hidden = !q || hits > 0;
++    return hits;
++  }
++  const setAll = (open) => ul.querySelectorAll('details').forEach(d => { d.open = open; });
++  return { root: el('div', null, none, ul), filter, setAll, count: items.length };
++}
++
++function pageAst(root) {
++  let source = state.astSource || 'minic';
++  const host = el('div');
++  const segMini = el('button', { 'aria-pressed': 'false', onClick: () => pick('minic') }, 'MiniC');
++  const segCpp = el('button', { 'aria-pressed': 'false', onClick: () => pick('cpp') }, 'C++ (clang)');
++  const search = el('input', { type: 'search', placeholder: 'Filter nodes…', 'aria-label': 'Filter nodes' });
++  const btnOpen = el('button', { class: 'btn', onClick: () => tree && tree.setAll(true) }, 'Expand all');
++  const btnClose = el('button', { class: 'btn', onClick: () => tree && tree.setAll(false) }, 'Collapse all');
++  const hitInfo = el('span', { class: 'faint' });
++  let tree = null;
++  search.addEventListener('input', () => { if (tree) { const n = tree.filter(search.value); hitInfo.textContent = search.value.trim() ? plural(n, 'match') : ''; } });
++
++  function pick(src) { source = src; state.astSource = src; load(); }
++
++  async function load() {
++    segMini.setAttribute('aria-pressed', String(source === 'minic'));
++    segCpp.setAttribute('aria-pressed', String(source === 'cpp'));
++    tree = null; search.value = ''; hitInfo.textContent = '';
++    host.replaceChildren(el('p', { class: 'muted', text: 'Loading…' }));
++    try {
++      let roots, info;
++      if (source === 'minic') {
++        const code = state.minic.code;
++        if (!code.trim()) { host.replaceChildren(el('div', { class: 'panel' }, el('div', { class: 'empty' }, el('b', { text: 'No MiniC code yet' }), 'Write a program on the MiniC pipeline page first.'))); return; }
++        const d = await ensurePipeline(code);
++        if (!d.ast) throw new Error('No syntax tree was produced.');
++        roots = [normMini(d.ast, '')];
++        info = d.parse_errors.length || d.lex_errors.length ? notice('warn', 'The program has syntax errors, so this tree is partial.') : null;
++      } else {
++        const code = state.cpp.code;
++        if (!code.trim()) { host.replaceChildren(el('div', { class: 'panel' }, el('div', { class: 'empty' }, el('b', { text: 'No C++ code yet' }), 'Load or write code in the C++ workspace first.'))); return; }
++        const d = await call('/api/cpp/ast', { code });
++        roots = d.tree.map(normClang);
++        info = null;
++      }
++      tree = TreeView(roots);
++      host.replaceChildren(info, el('div', { class: 'panel' }, el('div', { class: 'panel-body' }, tree.root),
++        el('div', { class: 'panel-foot' }, el('span', { text: plural(tree.count, 'node') }), el('span', { text: source === 'minic' ? 'From the project’s own parser' : 'From clang -ast-dump, filtered to your file' }))));
++    } catch (e) { host.replaceChildren(notice('bad', e.message)); }
++  }
++
++  root.append(
++    el('div', { class: 'page-head' },
++      el('div', null, el('h1', { text: 'Syntax tree' }),
++        el('p', { text: 'The abstract syntax tree is what the parser builds from your code. Choose the MiniC tree from this project’s parser, or the C++ tree from clang.' })),
++      el('div', { class: 'actions' }, el('div', { class: 'seg', role: 'group', 'aria-label': 'Tree source' }, segMini, segCpp), search, hitInfo, btnOpen, btnClose)),
++    host);
++  load();
++}
++
++/* ── AI insights ─────────────────────────────────────────────────────── */
++function pageAI(root) {
++  const s = state.minic;
++  s.ai = s.ai || {};
++  const ed = minicEditor(() => {});
++  const ready = state.status.ai_ready;
++
++  function runner(action, label, renderResult) {
++    return () => {
++      const host = el('div');
++      const note = el('p', { class: 'muted', style: 'margin-bottom:12px' });
++      const btn = el('button', { class: 'btn primary', disabled: !ready, onClick: go }, label);
++      const stale = () => s.ai[action] && s.ai[action].code !== ed.get();
++      function paint() {
++        host.replaceChildren();
++        const r = s.ai[action];
++        if (!r) return;
++        if (stale()) host.append(notice('warn', 'The code changed since this result. Run again to refresh.'), el('div', { style: 'height:12px' }));
++        if (state.status.llm_mock) host.append(notice('warn', el('b', { text: 'Mock mode: ' }), 'these answers are canned, not from a real model.'), el('div', { style: 'height:12px' }));
++        host.append(renderResult(r.data, ed));
++      }
++      async function go() {
++        const code = ed.get();
++        if (!code.trim()) { host.replaceChildren(notice('warn', 'Write or load some MiniC code first.')); return; }
++        await busy([btn], async () => {
++          try {
++            const d = await call('/api/minic/ai', { action, code });
++            s.ai[action] = { code, data: d.result, secs: d.elapsed_s }; paint(); announce('AI result ready');
++          } catch (e) { host.replaceChildren(notice('bad', e.message)); }
++        });
++      }
++      note.textContent = ready ? '' : 'AI features need a Gemini API key. Set GEMINI_API_KEY and restart the server (see the top bar). For an offline demo, start the server with LLM_MOCK=1.';
++      paint();
++      return el('div', null, el('div', { class: 'actions', style: 'margin-bottom:12px' }, btn, s.ai[action] ? el('span', { class: 'faint', text: 'Last run took ' + s.ai[action].secs + 's' }) : null), note.textContent ? note : null, host);
++    };
++  }
++
++  const tabs = Tabs([
++    { id: 'explain', label: 'Explain phases', render: runner('explain', 'Explain this program', renderExplain) },
++    { id: 'optimize', label: 'Optimize', render: runner('optimize', 'Ask AI to optimize', renderOptimize) },
++    { id: 'bugs', label: 'Find bugs', render: runner('bugs', 'Look for bugs', renderBugs) },
++  ], state.aiTab);
++  tabs.list.addEventListener('click', () => { state.aiTab = tabs.current; });
++
++  root.append(
++    el('div', { class: 'page-head' },
++      el('div', null, el('h1', { text: 'AI insights' }),
++        el('p', { text: 'The model explains, proposes and reviews. It never has the last word: optimizations are kept only if the program’s output is unchanged, and bug reports must point at real lines.' })),
++      el('div', { class: 'actions' }, SamplePicker('minic', (smp) => { ed.set(smp.code); ed.mark({}); tabs.refresh(); }))),
++    el('div', { class: 'split' },
++      el('div', { class: 'panel' }, el('div', { class: 'panel-head' }, el('h2', { text: 'program.minic' })), ed.root),
++      el('div', { class: 'panel' }, tabs.list, tabs.panel)));
++}
++
++function renderExplain(r) {
++  const P = r.phases || {};
++  const rows = [
++    ['Lexical analysis', P.lexical_analysis && plural(P.lexical_analysis.token_count, 'token'), P.lexical_analysis && P.lexical_analysis.explanation],
++    ['Syntax analysis', P.syntax_analysis && P.syntax_analysis.ast_summary, P.syntax_analysis && P.syntax_analysis.explanation],
++    ['Semantic analysis', P.semantic_analysis && ((P.semantic_analysis.symbols_declared || []).join(', ') || 'no symbols'), P.semantic_analysis && P.semantic_analysis.explanation],
++    ['IR generation', P.ir_generation && plural(P.ir_generation.instruction_count, 'instruction'), P.ir_generation && P.ir_generation.explanation],
++  ];
++  return el('div', null, el('p', { class: 'lede', style: 'margin-bottom:16px', text: r.program_summary || '' }),
++    rows.map(([t, sub, body]) => el('div', { class: 'phase' }, el('div', null, el('h3', { text: t }), el('div', { class: 'sub', text: sub || '' })), el('p', { text: body || '' }))));
++}
++
++function renderOptimize(r) {
++  const accepted = r.accepted || [], rejected = r.rejected || [];
++  return el('div', null,
++    r.analysis ? el('p', { class: 'muted', style: 'margin-bottom:12px', text: r.analysis }) : null,
++    el('dl', { class: 'kv' },
++      el('div', null, el('dt', { text: 'Instructions' }), el('dd', { text: r.initial_count + ' → ' + r.final_count })),
++      el('div', null, el('dt', { text: 'Kept' }), el('dd', { text: String(accepted.length) })),
++      el('div', null, el('dt', { text: 'Rejected' }), el('dd', { text: String(rejected.length) })),
++      el('div', null, el('dt', { text: 'Output unchanged' }), el('dd', { text: r.equivalence_verified ? 'yes' : 'NO' }))),
++    el('p', { class: 'faint', style: 'margin:8px 0 0', text: 'Only the intermediate code changes. Your source is untouched. Each suggestion was run against the original and dropped if the output differed.' }),
++    accepted.length ? el('div', null, el('div', { class: 'section-title', text: 'Kept suggestions' }),
++      accepted.map(a => el('div', { class: 'finding' }, el('div', null, el('b', { text: a.suggestion_id }), el('span', { class: 'faint', text: '  ' + (a.instruction_delta || 0) + ' instructions' })), el('div', { class: 'muted', text: a.description })))) : null,
++    rejected.length ? el('div', null, el('div', { class: 'section-title', text: 'Rejected suggestions' }),
++      rejected.map(a => el('div', { class: 'finding' }, el('div', null, el('b', { text: a.suggestion_id })), el('div', { class: 'muted', text: a.description }), el('div', { class: 'faint', text: 'Why: ' + a.reason })))) : null,
++    !accepted.length && !rejected.length ? el('p', { class: 'muted', style: 'margin-top:12px', text: 'The model found nothing to improve here.' }) : null,
++    el('div', { class: 'section-title', text: 'Change to the intermediate code' }), DiffView(r.ir_diff));
++}
++
++function renderBugs(r, ed) {
++  const bugs = r.bugs || [];
++  return el('div', null,
++    r.summary ? el('p', { class: 'lede', style: 'margin-bottom:12px', text: r.summary }) : null,
++    bugs.length ? bugs.map(b => el('div', { class: 'finding' },
++      el('div', null, el('span', { class: 'sev ' + String(b.severity || 'low').toLowerCase(), text: b.severity || 'low' }), ' ',
++        el('button', { class: 'linkish', text: 'line ' + b.line, onClick: () => ed.goto(b.line) }), el('span', { class: 'faint', text: '  ' + String(b.category || '').replace(/_/g, ' ') })),
++      el('div', { text: b.description }), b.fix_suggestion ? el('div', { class: 'muted', text: 'Suggestion: ' + b.fix_suggestion }) : null))
++      : notice('ok', 'No likely bugs reported.'),
++    r.discarded_bug_count ? el('p', { class: 'faint', style: 'margin-top:12px', text: plural(r.discarded_bug_count, 'finding') + ' dropped because they pointed at lines that do not exist in the parsed program.' }) : null);
++}
+diff --git a/src/web/static/pages-cpp.js b/src/web/static/pages-cpp.js
+new file mode 100644
+index 0000000..ee3acba
+--- /dev/null
++++ b/src/web/static/pages-cpp.js
+@@ -0,0 +1,260 @@
++'use strict';
++/* pages-cpp.js — C++ workspace (check, heal, accept/reject) and the Changes history. */
++
++const pendingCount = () => state.proposals.filter(p => p.status === 'pending').length;
++function updateNavCount() {
++  const b = $('#nav-count');
++  if (!b) return;
++  const n = pendingCount();
++  b.textContent = String(n);
++  b.hidden = n === 0;
++}
++
++function createProposal(r) {
++  const p = {
++    id: state.nextId++, time: Date.now(), mode: r.mode,
++    kind: r.mode === 'ai' ? 'C++ heal · Gemini agent' : 'C++ heal · rule-based',
++    original: r.original, patched: r.patched, diff: r.diff, steps: r.steps || [],
++    compiles: r.compiles, summary: r.summary || '', status: 'pending',
++  };
++  // A newer proposal supersedes any older pending one, so there is never an ambiguous choice.
++  state.proposals.forEach(o => { if (o.status === 'pending') o.status = 'rejected'; });
++  state.proposals.push(p);
++  state.cpp.pending = p;
++  saveProposals(); updateNavCount();
++  return p;
++}
++
++/** Accept / reject / undo with safety checks. Returns {ok, msg}. */
++function decide(p, action) {
++  const s = state.cpp;
++  if (action === 'accept') {
++    if (s.code !== p.original) return { ok: false, msg: 'Your code changed after this proposal was made, so applying it could overwrite your edits. Run the heal again.' };
++    s.code = p.patched; p.status = 'accepted'; s.result = null;
++  } else if (action === 'reject') {
++    p.status = 'rejected';
++  } else if (action === 'undo') {
++    if (s.code !== p.patched) return { ok: false, msg: 'The code has been edited since this change was accepted, so undoing it would discard those edits.' };
++    s.code = p.original; p.status = 'undone'; s.result = null;
++  }
++  if (s.pending === p && p.status !== 'pending') s.pending = null;
++  saveProposals(); updateNavCount();
++  return { ok: true };
++}
++
++const STATUS_CHIP = { pending: ['warn', 'Awaiting your decision'], accepted: ['ok', 'Accepted'], rejected: ['plain', 'Rejected'], undone: ['plain', 'Undone'] };
++const statusChip = (st) => el('span', { class: 'chip ' + STATUS_CHIP[st][0] }, el('i'), STATUS_CHIP[st][1]);
++
++function StepsList(steps) {
++  if (!steps || !steps.length) return null;
++  return el('ol', { class: 'steps', 'aria-label': 'What the healer tried' }, steps.map(st => {
++    if (st.thought !== undefined) return el('li', null, el('span', { class: 'ok', text: '•' }), el('span', null, el('b', { text: 'Step ' + st.attempt + ': ' }), st.thought));
++    return el('li', null,
++      el('span', { class: st.fixed ? 'ok' : 'no', text: st.fixed ? '✓' : '✕' }),
++      el('span', null, el('b', { text: 'Line ' + st.line + ': ' }), st.message || '', st.fixed ? ' — patched' : ' — ' + (st.note || 'not fixed')));
++  }));
++}
++
++/* ── C++ Workspace ───────────────────────────────────────────────────── */
++function pageWorkspace(root) {
++  const s = state.cpp;
++  const aiOK = state.status.ai_ready;
++  let lastDecisionNote = null;
++
++  const ed = Editor({
++    value: s.code, label: 'C++ source code',
++    onChange: (v) => { s.code = v; if (s.result && diagHost) { staleNote.hidden = v === s.lastCheckedCode; } },
++    onRun: () => check(),
++  });
++  const staleNote = el('span', { class: 'chip warn', hidden: true }, el('i'), 'Edited since last check');
++  const btnCheck = el('button', { class: 'btn primary', onClick: () => check() }, 'Check');
++  const btnRules = el('button', { class: 'btn', onClick: () => heal('rules') }, 'Suggest fix (rules)');
++  const btnAI = el('button', { class: 'btn', disabled: !aiOK, title: aiOK ? '' : 'Needs a Gemini API key', onClick: () => heal('ai') }, 'Suggest fix (AI)');
++  const proposalHost = el('div');
++  const diagHost = el('div');
++
++  function markEditor(r) {
++    const m = {};
++    for (const d of (r && r.diagnostics) || []) {
++      if (!d.line) continue;
++      if (d.type === 'error') m[d.line] = 'err'; else if (!m[d.line]) m[d.line] = 'warn';
++    }
++    ed.mark(m);
++  }
++
++  function renderProposal() {
++    const p = s.pending;
++    proposalHost.replaceChildren();
++    if (lastDecisionNote) proposalHost.append(lastDecisionNote);
++    if (!p) return;
++    const st = diffStats(p.diff);
++    const warn = state.status.llm_mock && p.mode === 'ai'
++      ? notice('warn', el('b', { text: 'Mock mode: ' }), 'this result is a canned response, not a real fix for your code.') : null;
++    const msgHost = el('div');
++    const accept = el('button', { class: 'btn primary', onClick: () => {
++      const res = decide(p, 'accept');
++      if (!res.ok) { msgHost.replaceChildren(notice('bad', res.msg)); return; }
++      ed.set(s.code); ed.mark({}); lastDecisionNote = notice('ok', el('b', { text: 'Change accepted. ' }), 'Editor updated. You can undo it from Changes.');
++      renderProposal(); announce('Change accepted'); check();
++    } }, 'Accept change');
++    const reject = el('button', { class: 'btn', onClick: () => {
++      decide(p, 'reject'); lastDecisionNote = notice('', 'Change rejected. Your code is unchanged.'); renderProposal(); announce('Change rejected');
++    } }, 'Reject');
++    proposalHost.append(el('section', { class: 'panel proposal', 'aria-label': 'Proposed change' },
++      el('div', { class: 'panel-head' },
++        el('h2', { text: 'Proposed change' }),
++        el('div', { class: 'actions' },
++          el('span', { class: 'chip plain' }, p.kind),
++          el('span', { class: 'chip ' + (p.compiles ? 'ok' : 'warn') }, el('i'), p.compiles ? 'Compiles after change' : 'Still has errors after change'))),
++      el('div', { class: 'panel-body' },
++        warn, warn && el('div', { style: 'height:12px' }),
++        StepsList(p.steps),
++        p.summary && el('p', { class: 'muted', text: p.summary, style: 'margin-bottom:12px' }),
++        el('p', { class: 'faint', style: 'margin-bottom:8px', text: '+' + st.add + ' added, −' + st.del + ' removed. Nothing changes until you accept.' }),
++        DiffView(p.diff),
++        el('div', { class: 'decision' }, accept, reject),
++        msgHost)));
++  }
++
++  function renderDiag() {
++    const r = s.result;
++    diagHost.replaceChildren();
++    if (!r) {
++      diagHost.append(el('div', { class: 'panel' }, el('div', { class: 'empty' },
++        el('b', { text: 'Nothing checked yet' }),
++        'Load an example or paste C++ code, then press Check (Ctrl+Enter). Errors are explained in plain language and can be fixed with a reviewable diff.')));
++      return;
++    }
++    const head = el('div', { class: 'panel-head' },
++      el('h2', { text: r.ok ? (r.warning_count ? 'Compiles, with warnings' : 'Compiles cleanly') : plural(r.error_count, 'error') + (r.warning_count ? ', ' + plural(r.warning_count, 'warning') : '') }),
++      el('span', { class: 'faint', text: r.elapsed_s + 's' }));
++    const list = el('div');
++    if (!r.diagnostics.length) list.append(el('div', { class: 'empty' }, el('b', { text: 'No diagnostics' }), 'g++ reported nothing for this file.'));
++    r.diagnostics.forEach(d => list.append(Diagnostic(d, ed)));
++    const secs = el('div');
++    if (r.security.length) {
++      secs.append(el('div', { class: 'panel-head' }, el('h2', { text: 'Security findings' }), el('span', { class: 'faint', text: String(r.security.length) })));
++      r.security.forEach(f => secs.append(SecurityItem(f, ed)));
++    }
++    diagHost.append(el('div', { class: 'panel' }, head, list, secs));
++  }
++
++  async function check() {
++    const code = ed.get();
++    if (!code.trim()) { diagHost.replaceChildren(notice('warn', 'Write or load some code first.')); return; }
++    await busy([btnCheck, btnRules, btnAI], async () => {
++      try {
++        const r = await call('/api/cpp/analyze', { code });
++        s.result = r; s.lastCheckedCode = code; staleNote.hidden = true;
++        markEditor(r); renderDiag();
++        announce(r.ok ? 'Compiles' : plural(r.error_count, 'error') + ' found');
++      } catch (e) { diagHost.replaceChildren(notice('bad', e.message)); }
++    });
++  }
++
++  async function heal(mode) {
++    const code = ed.get();
++    if (!code.trim()) { diagHost.replaceChildren(notice('warn', 'Write or load some code first.')); return; }
++    lastDecisionNote = null;
++    await busy([mode === 'ai' ? btnAI : btnRules, btnCheck, mode === 'ai' ? btnRules : btnAI], async () => {
++      try {
++        const r = await call('/api/cpp/heal', { mode, code });
++        if (!r.changed) {
++          s.pending = null;
++          proposalHost.replaceChildren(el('section', { class: 'panel' },
++            el('div', { class: 'panel-head' }, el('h2', { text: 'No change proposed' })),
++            el('div', { class: 'panel-body' },
++              el('p', { class: 'muted', text: r.compiles ? 'The code already compiles, so there is nothing to fix.' : 'No automatic fix was found for the remaining problems. Read the explanations below and edit the code, or try the AI fix.' }),
++              StepsList(r.steps))));
++          if (!r.compiles) { s.result = await call('/api/cpp/analyze', { code }); s.lastCheckedCode = code; markEditor(s.result); renderDiag(); }
++          announce('No change proposed');
++          return;
++        }
++        createProposal(r); renderProposal(); announce('A change is proposed. Review the diff.');
++      } catch (e) { proposalHost.replaceChildren(notice('bad', e.message)); }
++    });
++  }
++
++  root.append(
++    el('div', { class: 'page-head' },
++      el('div', null, el('h1', { text: 'C++ workspace' }),
++        el('p', { text: 'Check a C++ file with g++, read each problem explained, and review any suggested fix as a diff before it touches your code.' })),
++      el('div', { class: 'actions' }, SamplePicker('cpp', (smp) => {
++        ed.set(smp.code); s.result = null; s.pending = null; ed.mark({}); lastDecisionNote = null; renderProposal(); renderDiag();
++      }), btnCheck, btnRules, btnAI)),
++    !aiOK && el('p', { class: 'faint', style: 'margin:-12px 0 16px', text: 'AI fixes are off because no Gemini key is configured. Rule-based fixes work without one.' }),
++    el('div', { class: 'split' },
++      el('div', { class: 'panel' },
++        el('div', { class: 'panel-head' }, el('h2', { text: 'main.cpp' }), staleNote),
++        ed.root,
++        el('div', { class: 'panel-foot' }, el('span', { text: 'Ctrl+Enter to check' }), el('span', { text: 'Esc then Tab leaves the editor' }))),
++      el('div', { class: 'stack' }, proposalHost, diagHost)));
++  renderProposal(); renderDiag();
++  if (s.result) markEditor(s.result);
++}
++
++function Diagnostic(d, ed) {
++  const detail = el('div', { class: 'diag-detail', hidden: true },
++    d.explanation && el('div', null, el('h4', { text: 'What it means' }), el('pre', { text: String(d.explanation).replace(/^What happened:\s*/i, '').trim() })),
++    d.suggestion && el('div', null, el('h4', { text: 'Suggestion' }), el('pre', { text: d.suggestion })),
++    d.context && d.context.lines && el('div', null, el('h4', { text: 'Source' }),
++      el('pre', { class: 'mono', text: d.context.lines.map((ln, i) => String(d.context.start_line + i).padStart(3) + (d.context.start_line + i === d.line ? ' → ' : '   ') + ln.replace(/\s+$/, '')).join('\n') })));
++  const row = el('button', { class: 'diag-row', 'aria-expanded': 'false', onClick: () => {
++    const open = detail.hidden; detail.hidden = !open; row.setAttribute('aria-expanded', String(open));
++    if (open && d.line) ed.goto(d.line);
++  } },
++    el('span', { class: 'sev ' + d.type, text: d.type }),
++    el('span', null, el('span', { class: 'diag-msg', text: d.message }),
++      el('span', { class: 'diag-meta' },
++        d.line && el('span', { text: 'line ' + d.line + (d.column ? ':' + d.column : '') }),
++        d.category && el('span', { text: d.category.replace(/_/g, ' ') + (d.confidence ? ' · ' + Math.round(d.confidence * 100) + '%' : '') }))),
++    el('span', { class: 'faint', 'aria-hidden': 'true', text: '⌄' }));
++  return el('div', { class: 'diag' }, row, detail);
++}
++
++function SecurityItem(f, ed) {
++  return el('div', { class: 'diag' }, el('div', { class: 'diag-row', style: 'cursor:default' },
++    el('span', { class: 'sev ' + String(f.severity).toLowerCase(), text: f.severity }),
++    el('span', null, el('b', { text: f.vulnerability_type }), el('br'), el('span', { class: 'diag-msg muted', text: f.description }),
++      el('span', { class: 'diag-meta' }, el('span', { text: f.recommendation }))),
++    f.line ? el('button', { class: 'linkish', text: 'line ' + f.line, onClick: () => ed.goto(f.line) }) : el('span')));
++}
++
++/* ── Changes history ─────────────────────────────────────────────────── */
++function pageChanges(root) {
++  const host = el('div');
++  function render() {
++    host.replaceChildren();
++    const list = state.proposals.slice().reverse();
++    if (!list.length) {
++      host.append(el('div', { class: 'panel' }, el('div', { class: 'empty' }, el('b', { text: 'No proposed changes yet' }),
++        'When a fix is suggested in the C++ workspace it appears here with its diff. Nothing is applied until you accept it, and accepted changes can be undone.')));
++      return;
++    }
++    list.forEach(p => {
++      const st = diffStats(p.diff);
++      const msg = el('div');
++      const body = el('div', { class: 'change-body', hidden: p.status !== 'pending' }, StepsList(p.steps), DiffView(p.diff), msg);
++      const toggle = el('button', { class: 'btn quiet', 'aria-expanded': String(p.status === 'pending'), onClick: () => {
++        body.hidden = !body.hidden; toggle.setAttribute('aria-expanded', String(!body.hidden)); toggle.textContent = body.hidden ? 'Show diff' : 'Hide diff';
++      } }, p.status === 'pending' ? 'Hide diff' : 'Show diff');
++      const act = el('div', { class: 'actions' }, toggle);
++      const run = (action) => { const r = decide(p, action); if (!r.ok) { msg.replaceChildren(notice('bad', r.msg)); return; } render(); announce('Change ' + action); };
++      if (p.status === 'pending') act.append(el('button', { class: 'btn primary', onClick: () => run('accept') }, 'Accept'), el('button', { class: 'btn', onClick: () => run('reject') }, 'Reject'));
++      if (p.status === 'accepted') act.append(el('button', { class: 'btn', onClick: () => run('undo') }, 'Undo'));
++      host.append(el('article', { class: 'change' },
++        el('div', { class: 'change-head' },
++          el('div', null, el('h3', { text: p.kind }),
++            el('div', { class: 'diag-meta' }, el('span', { text: timeLabel(p.time) }), el('span', { text: '+' + st.add + ' −' + st.del }), p.compiles ? el('span', { text: 'compiled after change' }) : null)),
++          el('div', { class: 'actions' }, statusChip(p.status), act)),
++        body));
++    });
++  }
++  root.append(
++    el('div', { class: 'page-head' },
++      el('div', null, el('h1', { text: 'Changes' }),
++        el('p', { text: 'Every fix the tool has proposed, what it would change, and what you decided.' })),
++      state.proposals.length ? el('button', { class: 'btn quiet', onClick: () => { state.proposals = state.proposals.filter(p => p.status === 'pending'); saveProposals(); render(); } }, 'Clear finished items') : null),
++    host);
++  render();
++}
+diff --git a/src/web/static/pages-evidence.js b/src/web/static/pages-evidence.js
+new file mode 100644
+index 0000000..4f90ef2
+--- /dev/null
++++ b/src/web/static/pages-evidence.js
+@@ -0,0 +1,171 @@
++'use strict';
++/* pages-evidence.js — Benchmark results and Architecture (before / after). */
++
++/* ── Benchmark ───────────────────────────────────────────────────────── */
++function Bar(label, value, count, total, cls) {
++  return el('div', { class: 'bar-row' },
++    el('span', { text: label }),
++    el('div', { class: 'bar-track', role: 'img', 'aria-label': label + ': ' + pct(value) }, el('div', { class: 'bar-fill ' + (cls || ''), style: 'width:' + (value || 0) + '%' })),
++    el('span', { class: 'bar-val', text: pct(value) }));
++}
++const mark = (v) => v === 'yes' ? el('span', { class: 'mark y', 'aria-label': 'fixed', text: '✓' })
++  : v === 'no' ? el('span', { class: 'mark n', 'aria-label': 'not fixed', text: '✕' })
++  : el('span', { class: 'mark c', 'aria-label': 'not needed', text: '–' });
++
++async function pageBenchmark(root) {
++  root.append(el('div', { class: 'page-head' }, el('div', null, el('h1', { text: 'Benchmark' }),
++    el('p', { text: 'Measured results from results/final.csv. Every figure here is recomputed from the raw rows when the page loads.' }))));
++  const host = el('div'); root.append(host);
++  let b;
++  try { b = await call('/api/benchmark'); } catch (e) { host.append(notice('bad', e.message)); return; }
++  const h = b.healing;
++
++  host.append(
++    el('p', { class: 'lede', text: 'Of ' + h.broken + ' C++ files that failed to compile, the rule-based healer fixed ' + h.rule_fixed + ' and the Gemini agent fixed ' + h.ai_fixed + '.' }),
++    el('div', { class: 'bars' },
++      Bar('Rule-based healer', h.rule_rate, h.rule_fixed, h.broken),
++      Bar('Gemini agent', h.ai_rate, h.ai_fixed, h.ai_ran, 'ai')),
++    el('p', { class: 'faint', style: 'max-width:70ch', text: 'Averages: ' + (h.rule_avg_s ?? '—') + 's per file for rules, ' + (h.ai_avg_s ?? '—') + 's for the agent. ' + h.note }),
++    h.ai_guardrail_blocked ? el('p', { class: 'faint', style: 'max-width:70ch;margin-top:6px', text: h.ai_guardrail_blocked + ' of the agent’s ' + (h.ai_ran - h.ai_fixed) + ' misses came back almost instantly: the security guardrail refused those attack-test files on purpose, before any model call.' }) : null,
++    el('p', { class: 'faint', style: 'max-width:70ch;margin-top:6px', text: h.already_clean + ' of ' + h.total_fixtures + ' fixtures already compiled and are left out of the rates. The error classifier matched its label on ' + pct(h.classifier_accuracy) + ' of files; those labels are partly guessed from file names, so treat that number loosely.' }));
++
++  const onlyBroken = el('input', { type: 'checkbox', id: 'only-broken', checked: true });
++  const tbody = el('tbody');
++  const paint = () => {
++    tbody.replaceChildren(...b.per_file.filter(r => !onlyBroken.checked || !r.baseline_clean).map(r => el('tr', null,
++      el('td', { class: 'mono', text: r.file }),
++      el('td', { class: 'num' }, r.baseline_clean ? mark('clean') : mark(r.rule)),
++      el('td', { class: 'num' }, r.baseline_clean ? mark('clean') : mark(r.ai)),
++      el('td', { class: 'num', text: r.baseline_clean ? '' : (r.rule_time ?? '').toString() }),
++      el('td', { class: 'num', text: r.baseline_clean ? '' : (r.ai_time ?? '').toString() }))));
++  };
++  onlyBroken.addEventListener('change', paint); paint();
++  host.append(
++    el('div', { class: 'section-title', style: 'margin-top:32px', text: 'File by file' }),
++    el('label', { style: 'display:flex;gap:8px;align-items:center;margin-bottom:8px' }, onlyBroken, 'Only files that needed repair'),
++    el('div', { class: 'scroll' }, el('table', { class: 'data' },
++      el('thead', null, el('tr', null, el('th', { text: 'File' }), el('th', { class: 'num', text: 'Rules' }), el('th', { class: 'num', text: 'Gemini' }), el('th', { class: 'num', text: 'Rules (s)' }), el('th', { class: 'num', text: 'Gemini (s)' }))), tbody)));
++
++  const v = b.verifier, l = b.live_optimizer;
++  host.append(
++    el('h2', { style: 'margin-top:40px', text: 'Optimization safety' }),
++    el('div', { class: 'cols2', style: 'margin-top:12px' },
++      el('div', { class: 'panel' }, el('div', { class: 'panel-body' }, el('h3', { text: 'Verifier test (scripted)' }),
++        el('p', { class: 'muted', style: 'margin:6px 0 10px', text: v.note }),
++        el('dl', { class: 'kv' }, kv('Programs', v.programs), kv('Suggestions', v.proposed), kv('Admitted', v.accepted), kv('Blocked', v.rejected)))),
++      el('div', { class: 'panel' }, el('div', { class: 'panel-body' }, el('h3', { text: 'Live Gemini suggestions' }),
++        el('p', { class: 'muted', style: 'margin:6px 0 10px', text: l.note }),
++        el('dl', { class: 'kv' }, kv('Programs', l.programs), kv('Suggestions', l.proposed), kv('Kept', l.accepted), kv('Rejected', l.rejected), kv('Instructions removed', l.ir_removed))))),
++    el('p', { class: 'faint', style: 'margin-top:12px;max-width:70ch', text: 'The check compares program output on one run. That is strong testing, not a proof of equivalence, and the set is small (' + l.programs + ' programs). Treat it as evidence the mechanism works, not a measure of Gemini’s skill.' }));
++}
++const kv = (k, v) => el('div', null, el('dt', { text: k }), el('dd', { text: String(v) }));
++
++/* ── Architecture diagrams ───────────────────────────────────────────── */
++function Box(n) {
++  const g = svg('g', { transform: 'translate(' + n.x + ',' + n.y + ')' });
++  g.append(svg('rect', { class: 'box' + (n.isNew ? ' new' : ''), width: n.w, height: n.h, rx: 6 }));
++  g.append(svg('text', { class: 't1', x: 12, y: n.sub ? n.h / 2 - 2 : n.h / 2 + 4.5 }, n.t));
++  if (n.sub) g.append(svg('text', { class: 't2', x: 12, y: n.h / 2 + 15 }, n.sub));
++  if (n.isNew) g.append(svg('text', { class: 'tag', x: n.w - 10, y: 14, 'text-anchor': 'end' }, 'NEW'));
++  return g;
++}
++function Diagram(spec) {
++  const root = svg('svg', { class: 'diagram', viewBox: '0 0 ' + spec.w + ' ' + spec.h, role: 'img', 'aria-label': spec.label });
++  root.append(svg('defs', null,
++    svg('marker', { id: 'arr-' + spec.id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, svg('path', { d: 'M0 0 L10 5 L0 10 z', fill: 'context-stroke' }))));
++  (spec.bands || []).forEach(b => {
++    root.append(svg('rect', { class: 'band', x: 8, y: b.y, width: spec.w - 16, height: b.h, rx: 10 }));
++    root.append(svg('text', { class: 'band-title', x: 22, y: b.y + 20 }, b.t));
++  });
++  const byId = {}; spec.nodes.forEach(n => { byId[n.id] = n; });
++  spec.edges.forEach(e => {
++    root.append(svg('path', { class: 'edge' + (e.dash ? ' dash' : ''), d: e.d, 'marker-end': 'url(#arr-' + spec.id + ')' }));
++    if (e.label) root.append(svg('text', { class: 'elabel', x: e.lx, y: e.ly }, e.label));
++  });
++  spec.nodes.forEach(n => root.append(Box(n)));
++  return root;
++}
++const N = (id, x, y, w, h, t, sub, isNew) => ({ id, x, y, w, h, t, sub, isNew });
++
++const BEFORE = {
++  id: 'before', w: 1060, h: 360, label: 'Architecture before: C++ source goes through g++, an error parser, an ML classifier and explainer, then a rule-based healer and the PyQt GUI.',
++  bands: [{ y: 14, h: 120, t: 'Diagnose' }, { y: 150, h: 112, t: 'Repair & present' }, { y: 278, h: 70, t: 'Side analyzers' }],
++  nodes: [
++    N('src', 24, 52, 176, 60, 'C++ source'),
++    N('gxx', 224, 52, 176, 60, 'g++ runner', 'compiler_runner.py'),
++    N('par', 424, 52, 176, 60, 'Error parser', 'error_parser, normalizer'),
++    N('clf', 624, 52, 176, 60, 'ML classifier', 'scikit-learn, 67k rows'),
++    N('exp', 824, 52, 212, 60, 'Explainer + glossary', 'error_explainer.py'),
++    N('rul', 24, 188, 176, 60, 'Rule-based healer', 'auto_healer.py'),
++    N('lop', 224, 188, 176, 60, 'Heal loop', 'up to 3 attempts'),
++    N('dif', 424, 188, 176, 60, 'Diff viewer', 'diff_viewer.py'),
++    N('gui', 624, 188, 176, 60, 'PyQt6 GUI', 'gui.py'),
++    N('ast', 24, 300, 176, 38, 'clang AST extractor'),
++    N('sec', 224, 300, 176, 38, 'Security analyzer'),
++    N('cal', 424, 300, 176, 38, 'Call graph + energy'),
++  ],
++  edges: [
++    { d: 'M200 82 H224' }, { d: 'M400 82 H424' }, { d: 'M600 82 H624' }, { d: 'M800 82 H824' },
++    { d: 'M930 112 V150 H112 V188' },
++    { d: 'M200 218 H224' }, { d: 'M400 218 H424' }, { d: 'M600 218 H624' },
++  ],
++};
++
++const AFTER = {
++  id: 'after', w: 1060, h: 700, label: 'Architecture after: the C++ track gains an AI healing tier with reviewable diffs; a new AI layer with an LLM client and security guardrail serves the explainer, optimizer and bug detector; a MiniC compiler core with an interpreter verifies AI proposals; PyQt and web interfaces and a benchmark harness sit on top.',
++  bands: [{ y: 12, h: 188, t: 'C++ track' }, { y: 212, h: 168, t: 'AI layer' }, { y: 392, h: 120, t: 'MiniC compiler core (src/core)' }, { y: 524, h: 164, t: 'Interfaces & evidence' }],
++  nodes: [
++    N('src', 24, 56, 150, 60, 'C++ source'),
++    N('gxx', 200, 56, 170, 60, 'g++ + diagnostics', 'runner, parser, normalizer'),
++    N('clf', 396, 56, 170, 60, 'Classifier + explainer', 'ML + glossary'),
++    N('rul', 612, 44, 200, 52, 'Tier 1: rule healer', 'auto_healer (fixed)'),
++    N('ai1', 612, 116, 200, 60, 'Tier 2: Gemini agent', 'ReAct loop, up to 6 steps'),
++    N('acc', 850, 78, 186, 60, 'Diff → accept / reject', 'nothing applied silently', true),
++    N('llm', 24, 256, 210, 60, 'LLM client', 'cache · retry · mock mode', true),
++    N('grd', 262, 256, 210, 60, 'Security guardrail', 'checks prompts and patches'),
++    N('exr', 520, 238, 190, 40, 'Phase explainer', null, true),
++    N('opt', 520, 288, 190, 40, 'AI optimizer', null, true),
++    N('bug', 520, 338, 190, 34, 'Bug detector', null, true),
++    N('lex', 24, 430, 140, 60, 'Lexer', 'tokens', true),
++    N('prs', 190, 430, 140, 60, 'Parser', 'recursive descent, AST', true),
++    N('sem', 356, 430, 140, 60, 'Semantic', 'scopes, types', true),
++    N('ir', 522, 430, 140, 60, 'TAC IR', 'three-address code', true),
++    N('op', 688, 430, 150, 60, 'Optimizer', '5 classic passes', true),
++    N('int', 864, 430, 172, 60, 'Interpreter', 'verifies AI proposals', true),
++    N('qt', 24, 568, 220, 60, 'PyQt6 desktop app', 'kept as it was'),
++    N('web', 270, 568, 220, 60, 'Web studio', 'this app', true),
++    N('bm', 516, 568, 250, 60, 'Benchmark harness', 'rules vs AI, verifier tests', true),
++    N('csv', 792, 568, 244, 60, 'results/final.csv', 'figures on the Benchmark page', true),
++  ],
++  edges: [
++    { d: 'M174 86 H200' }, { d: 'M370 86 H396' }, { d: 'M566 86 H612' }, { d: 'M566 96 H590 V146 H612' },
++    { d: 'M812 70 H831 V108 H850' }, { d: 'M812 146 H831 V108' },
++    { d: 'M712 176 V196 H367 V256', dash: true, label: 'every call is checked', lx: 400, ly: 190 },
++    { d: 'M234 286 H262', dash: true }, { d: 'M472 286 H496 V258 H520', dash: true }, { d: 'M496 286 V308 H520', dash: true }, { d: 'M496 286 V355 H520', dash: true },
++    { d: 'M164 460 H190' }, { d: 'M330 460 H356' }, { d: 'M496 460 H522' }, { d: 'M662 460 H688' }, { d: 'M838 460 H864' },
++    { d: 'M710 308 H950 V430', dash: true, label: 'AI proposes, interpreter verifies', lx: 722, ly: 302 },
++    { d: 'M766 598 H792' },
++  ],
++};
++
++function pageArchitecture(root) {
++  let view = state.archView || 'after';
++  const host = el('div');
++  const b1 = el('button', { 'aria-pressed': 'false', onClick: () => set('before') }, 'Before');
++  const b2 = el('button', { 'aria-pressed': 'false', onClick: () => set('after') }, 'After');
++  function set(v) {
++    view = v; state.archView = v;
++    b1.setAttribute('aria-pressed', String(v === 'before')); b2.setAttribute('aria-pressed', String(v === 'after'));
++    host.replaceChildren(
++      el('div', { class: 'panel' }, el('div', { class: 'panel-body' }, Diagram(v === 'before' ? BEFORE : AFTER))),
++      el('div', { class: 'legend' }, el('span', null, el('i'), 'Existing component'), v === 'after' ? el('span', null, el('i', { class: 'new' }), 'Added in this version') : null,
++        v === 'after' ? el('span', null, el('i', { class: 'dash' }), 'Dashed line = AI traffic or verification') : null),
++      el('p', { class: 'muted', style: 'margin-top:16px;max-width:72ch', text: v === 'before'
++        ? 'The original tool wrapped g++: it parsed compiler messages, classified them, explained them and applied hand-written repair rules.'
++        : 'The new version keeps that pipeline and adds: a MiniC compiler core that owns every phase, an AI layer (shared LLM client, phase explainer, optimizer, bug detector) where the interpreter checks whatever the model proposes, repair proposals shown as a diff you must accept, and a benchmark harness. The Gemini agent and security guardrail were already in the repository but missing from the original documentation, so they are not marked as new.' }));
++  }
++  root.append(el('div', { class: 'page-head' }, el('div', null, el('h1', { text: 'Architecture' }),
++    el('p', { text: 'How the project looked before this work and how it is organised now. Box subtitles name the source files.' })),
++    el('div', { class: 'seg', role: 'group', 'aria-label': 'Version' }, b1, b2)), host);
++  set(view);
++}
+diff --git a/tests/test_ir_optimizer_interpreter.py b/tests/test_ir_optimizer_interpreter.py
+index 1ccc8db..aed07c4 100644
+--- a/tests/test_ir_optimizer_interpreter.py
++++ b/tests/test_ir_optimizer_interpreter.py
+@@ -343,3 +343,15 @@ class TestIROptimizerInterpreter(unittest.TestCase):
+ 
+ if __name__ == "__main__":
+     unittest.main()
++
++
++def test_interpreter_rejects_unknown_opcode():
++    """An unknown TAC op must raise, otherwise a bogus AI patch could slip past verification."""
++    import pytest
++    from core.ir import Instruction, generate_ir
++    from core.interpreter import run_ir
++
++    ir = generate_ir("int main() { int a = 5; print(a); return 0; }")
++    ir.insert(1, Instruction(op="FROBNICATE", result="a"))
++    with pytest.raises(RuntimeError, match="Unknown TAC instruction"):
++        run_ir(ir)
+diff --git a/tests/test_web_api.py b/tests/test_web_api.py
+new file mode 100644
+index 0000000..caee0ba
+--- /dev/null
++++ b/tests/test_web_api.py
+@@ -0,0 +1,200 @@
++"""
++test_web_api.py
++---------------
++Tests for the local web UI backend (src/web/server.py).
++
++Starts the real HTTP server on an ephemeral port and calls it with urllib, so routing,
++JSON handling, static-file safety and the compiler-backed endpoints are all exercised.
++Compiler-backed tests are skipped when g++ is not installed.
++"""
++
++import json
++import os
++import shutil
++import sys
++import threading
++import unittest
++import urllib.error
++import urllib.request
++
++sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
++
++from web import server  # noqa: E402
++
++HAS_GXX = shutil.which("g++") is not None
++
++MISSING_SEMICOLON = (
++    "#include <iostream>\n"
++    "int main() {\n"
++    "    int x = 5\n"
++    "    std::cout << x;\n"
++    "    return 0;\n"
++    "}\n"
++)
++
++
++class WebApiTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        # Make AI behaviour deterministic: no key, no mock.
++        cls._saved = {k: os.environ.pop(k, None) for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "LLM_MOCK")}
++        cls._orig_key = server._api_key
++        server._api_key = lambda: None
++        cls.srv = server.make_server("127.0.0.1", 0)
++        cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
++        cls.thread = threading.Thread(target=cls.srv.serve_forever, daemon=True)
++        cls.thread.start()
++
++    @classmethod
++    def tearDownClass(cls):
++        cls.srv.shutdown()
++        cls.srv.server_close()
++        server._api_key = cls._orig_key
++        for k, v in cls._saved.items():
++            if v is not None:
++                os.environ[k] = v
++
++    # -- helpers -------------------------------------------------------------
++    def get(self, path):
++        try:
++            with urllib.request.urlopen(self.base + path, timeout=60) as r:
++                return r.status, r.read()
++        except urllib.error.HTTPError as e:
++            return e.code, e.read()
++
++    def post(self, path, payload=None, raw=None):
++        data = raw if raw is not None else json.dumps(payload).encode()
++        req = urllib.request.Request(self.base + path, data=data, headers={"Content-Type": "application/json"})
++        try:
++            with urllib.request.urlopen(req, timeout=120) as r:
++                return r.status, json.loads(r.read())
++        except urllib.error.HTTPError as e:
++            return e.code, json.loads(e.read())
++
++    # -- static + status -----------------------------------------------------
++    def test_index_is_served(self):
++        status, body = self.get("/")
++        self.assertEqual(status, 200)
++        self.assertIn(b"Green Compiler Studio", body)
++
++    def test_path_traversal_is_blocked(self):
++        for p in ("/../server.py", "/%2e%2e/server.py", "/..%2f..%2fREADME.md"):
++            status, _ = self.get(p)
++            self.assertEqual(status, 404, p)
++
++    def test_status_reports_no_ai_without_key(self):
++        status, body = self.get("/api/status")
++        d = json.loads(body)
++        self.assertEqual(status, 200)
++        self.assertFalse(d["ai_ready"])
++        self.assertFalse(d["llm_mock"])
++
++    def test_samples_include_both_languages(self):
++        d = json.loads(self.get("/api/samples")[1])
++        langs = {s["language"] for s in d["samples"]}
++        self.assertEqual(langs, {"minic", "cpp"})
++
++    def test_benchmark_rates_are_recomputed_from_csv(self):
++        status, body = self.get("/api/benchmark")
++        if status == 404:
++            self.skipTest("results/final.csv not present")
++        h = json.loads(body)["healing"]
++        self.assertEqual(h["broken"] + h["already_clean"], h["total_fixtures"])
++        self.assertAlmostEqual(h["rule_rate"], round(100.0 * h["rule_fixed"] / h["broken"], 1))
++
++    # -- error handling ------------------------------------------------------
++    def test_bad_requests_get_json_errors(self):
++        self.assertEqual(self.post("/api/cpp/analyze", {})[0], 400)
++        self.assertEqual(self.post("/api/cpp/analyze", raw=b"not json")[0], 400)
++        self.assertEqual(self.post("/api/nope", {})[0], 404)
++        self.assertEqual(self.post("/api/cpp/heal", {"code": "int main(){}", "mode": "weird"})[0], 400)
++
++    def test_ai_endpoints_explain_missing_key(self):
++        status, d = self.post("/api/minic/ai", {"action": "explain", "code": "int main() { return 0; }"})
++        self.assertEqual(status, 412)
++        self.assertIn("GEMINI_API_KEY", d["error"])
++        status, d = self.post("/api/cpp/heal", {"mode": "ai", "code": "int main() { return 0 }"})
++        self.assertEqual(status, 412)
++
++    def test_ai_action_is_validated(self):
++        status, _ = self.post("/api/minic/ai", {"action": "delete", "code": "int main() { return 0; }"})
++        self.assertEqual(status, 400)
++
++    # -- MiniC pipeline ------------------------------------------------------
++    def test_pipeline_runs_and_optimizer_preserves_output(self):
++        code = "int main() { int i = 0; int s = 0; while (i < 5) { s = s + i; i = i + 1; } print(s); return 0; }"
++        status, d = self.post("/api/minic/pipeline", {"code": code})
++        self.assertEqual(status, 200)
++        self.assertEqual(d["stage_reached"], "executed")
++        self.assertEqual(d["output"], ["10"])
++        self.assertTrue(d["equivalent"])
++        self.assertLessEqual(len(d["optimized_ir"]), len(d["ir"]))
++        self.assertEqual(d["ast"]["type"], "Program")
++
++    def test_pipeline_stops_at_syntax_errors(self):
++        status, d = self.post("/api/minic/pipeline", {"code": "int main() { int x = ; return 0; }"})
++        self.assertEqual(status, 200)
++        self.assertEqual(d["stage_reached"], "parse")
++        self.assertTrue(d["parse_errors"])
++        self.assertEqual(d["ir"], [])
++
++    def test_pipeline_reports_semantic_errors(self):
++        code = "int main() { int a = 1; int a = 2; b = 3; return 0; }"
++        d = self.post("/api/minic/pipeline", {"code": code})[1]
++        self.assertEqual(d["stage_reached"], "semantic")
++        msgs = " ".join(x["message"] for x in d["semantic"])
++        self.assertIn("Redeclaration", msgs)
++        self.assertIn("Undeclared", msgs)
++
++    # -- C++ endpoints (need g++) -------------------------------------------
++    @unittest.skipUnless(HAS_GXX, "g++ not installed")
++    def test_cpp_analyze_finds_missing_semicolon(self):
++        status, d = self.post("/api/cpp/analyze", {"code": MISSING_SEMICOLON})
++        self.assertEqual(status, 200)
++        self.assertFalse(d["ok"])
++        self.assertGreaterEqual(d["error_count"], 1)
++        self.assertTrue(d["diagnostics"][0]["explanation"])
++
++    @unittest.skipUnless(HAS_GXX, "g++ not installed")
++    def test_cpp_analyze_clean_code(self):
++        d = self.post("/api/cpp/analyze", {"code": "int main() { return 0; }"})[1]
++        self.assertTrue(d["ok"])
++
++    @unittest.skipUnless(HAS_GXX, "g++ not installed")
++    def test_heal_proposes_a_diff_and_does_not_apply_it(self):
++        status, d = self.post("/api/cpp/heal", {"mode": "rules", "code": MISSING_SEMICOLON})
++        self.assertEqual(status, 200)
++        self.assertTrue(d["changed"])
++        self.assertTrue(d["compiles"])
++        self.assertEqual(d["original"], MISSING_SEMICOLON)
++        self.assertIn("int x = 5;", d["patched"])
++        kinds = {(l["kind"], l["text"].strip()) for l in d["diff"] if l["kind"] != " "}
++        self.assertEqual(kinds, {("-", "int x = 5"), ("+", "int x = 5;")})
++
++    @unittest.skipUnless(HAS_GXX, "g++ not installed")
++    def test_heal_clean_code_proposes_nothing(self):
++        d = self.post("/api/cpp/heal", {"mode": "rules", "code": "int main() { return 0; }"})[1]
++        self.assertFalse(d["changed"])
++        self.assertTrue(d["compiles"])
++
++    @unittest.skipUnless(HAS_GXX, "g++ not installed")
++    def test_dangerous_code_is_blocked_before_compiling(self):
++        d = self.post("/api/cpp/analyze", {"code": 'int main() { system("ls"); return 0; }'})[1]
++        self.assertFalse(d["ok"])
++        self.assertIn("Security Error", d["diagnostics"][0]["message"])
++
++
++class HealerRegressionTests(unittest.TestCase):
++    """The common GCC message `expected ',' or ';' before ...` must be fixable (curly or ASCII quotes)."""
++
++    def test_comma_or_semicolon_message_is_fixed(self):
++        from auto_healer import attempt_fix
++        src = MISSING_SEMICOLON
++        for msg in ("expected ',' or ';' before 'std'", "expected ‘,’ or ‘;’ before ‘std’"):
++            patched = attempt_fix(src, {"message": msg, "line": 4, "column": 5, "category": "syntax_error"})
++            self.assertIsNotNone(patched, msg)
++            self.assertIn("int x = 5;", patched)
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -201,20 +201,20 @@ python src/gui.py
 ### 6.2 Self-Healing Compiler CLI
 Run autonomous iterative healing on any broken C++ source file:
 ```bash
-python heal.py test_cases/syntax_error.cpp
+python src/main.py test_cases/syntax_error.cpp
 ```
 
-### 6.3 MiniC Clean-Room Compiler CLI
-Inspect each classical compilation phase for MiniC source programs:
+### 6.3 MiniC Clean-Room Compiler (Python API)
+Inspect each classical compilation phase for a MiniC program. Run from the repository root:
 ```bash
 # Tokenize
-python -c "from src.core.lexer import Lexer; print(Lexer('int main() { return 42; }').tokenize())"
+python -c "import sys; sys.path.insert(0,'src'); from core.lexer import Lexer; print(Lexer('int main() { return 42; }').tokenize())"
 
-# Parse AST
-python -c "from src.core.lexer import Lexer; from src.core.parser import Parser; print(Parser(Lexer('int main() { int x = 10; return x; }').tokenize()).parse().to_tree())"
+# Parse and pretty-print the AST
+python -c "import sys; sys.path.insert(0,'src'); from core.lexer import Lexer; from core.parser import Parser; from core.ast_nodes import pretty_print_ast; print(pretty_print_ast(Parser(Lexer('int main() { int x = 10; return x; }').tokenize()).parse()))"
 
-# Generate TAC IR & Optimize
-python -c "from src.core.lexer import Lexer; from src.core.parser import Parser; from src.core.semantic import SemanticAnalyzer; from src.core.ir import generate_ir; from src.core.optimizer import optimize_ir; ast = Parser(Lexer('int main() { int a = 2 + 3; return a; }').tokenize()).parse(); SemanticAnalyzer().analyze(ast); ir = generate_ir(ast); opt_ir, passes = optimize_ir(ir); print('Optimized IR:', len(opt_ir))"
+# Generate three-address code, optimize it, and run both versions
+python -c "import sys; sys.path.insert(0,'src'); from core.ir import generate_ir; from core.optimizer import optimize; from core.interpreter import run_ir; ir = generate_ir('int main() { int a = 2 + 3; print(a); return a; }'); opt, stats = optimize(ir); print(len(ir), '->', len(opt), 'instructions'); print(run_ir(ir), run_ir(opt))"
 ```
 
 ### 6.4 Comparative Benchmark Suite
@@ -232,6 +232,19 @@ Execute the comprehensive 161-test pytest validation suite:
 ```bash
 pytest tests/ -v
 ```
+
+### 6.6 Web Studio (browser interface)
+A browser interface that reuses the same Python modules and needs no extra packages:
+```bash
+python src/web/server.py              # opens http://127.0.0.1:8765
+python src/web/server.py --no-browser --port 9000
+```
+Pages: C++ workspace (check, explanations, suggested fixes), Changes (every proposed fix with accept / reject / undo), MiniC pipeline, Syntax tree (MiniC and clang), AI insights, Benchmark and Architecture.
+
+- Fixes are only *proposed*. The browser shows a diff and nothing changes until you press Accept.
+- The server listens on `127.0.0.1` only and never runs compiled C++ programs.
+- AI features need `GEMINI_API_KEY` in the environment (or a `.env` file). Without it, everything else still works. `LLM_MOCK=1` gives canned answers for an offline demo, and the UI shows a banner while it is on.
+- The Benchmark page recomputes every figure from `results/final.csv` when it loads.
 
 ---
 

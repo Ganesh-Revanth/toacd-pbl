@@ -621,6 +621,7 @@ def fix_syntax_error(source: str, error: dict) -> Optional[str]:
 
     # Fix: missing semicolon (check previous non-empty line first, then current line)
     if (re.search(r"expected\s+['\"]?;['\"]?", msg) or
+        re.search(r"expected\s+['\"]?,['\"]?\s+or\s+['\"]?;['\"]?", msg) or
         "expected initializer before" in msg or
         "expected unqualified-id before" in msg or
         "expected primary-expression before" in msg or
@@ -1156,11 +1157,20 @@ _HANDLERS = {
 UNFIXABLE_CATEGORIES = {"linker_error", "access_error", "unused_variable"}
 
 
+_CURLY_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
+
+
+def _ascii_quotes(text: str) -> str:
+    """GCC prints curly quotes in UTF-8 locales; all fix patterns expect ASCII quotes."""
+    return text.translate(_CURLY_QUOTES)
+
+
 def attempt_fix(source: str, error: dict) -> Optional[str]:
     """
     Main entry point.
     Returns patched source string, or None if no fix could be applied.
     """
+    error = {**error, "message": _ascii_quotes(error.get("message", ""))}
     category = error.get("category", "other")
     msg = error.get("message", "").lower()
 

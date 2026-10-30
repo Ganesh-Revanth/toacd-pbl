@@ -343,3 +343,15 @@ class TestIROptimizerInterpreter(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_interpreter_rejects_unknown_opcode():
+    """An unknown TAC op must raise, otherwise a bogus AI patch could slip past verification."""
+    import pytest
+    from core.ir import Instruction, generate_ir
+    from core.interpreter import run_ir
+
+    ir = generate_ir("int main() { int a = 5; print(a); return 0; }")
+    ir.insert(1, Instruction(op="FROBNICATE", result="a"))
+    with pytest.raises(RuntimeError, match="Unknown TAC instruction"):
+        run_ir(ir)

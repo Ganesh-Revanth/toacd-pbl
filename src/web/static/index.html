@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Green Compiler Studio</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="app">
+    <nav class="rail" id="rail" aria-label="Main"></nav>
+    <div class="content">
+      <div class="topbar" id="topbar" aria-label="Environment status"></div>
+      <div id="banner"></div>
+      <main id="main" tabindex="-1"></main>
+    </div>
+  </div>
+  <div id="live" class="sr" aria-live="polite"></div>
+  <script src="core.js"></script>
+  <script src="pages-cpp.js"></script>
+  <script src="pages-compiler.js"></script>
+  <script src="pages-evidence.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

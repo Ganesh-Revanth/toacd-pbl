@@ -248,8 +248,9 @@ class Interpreter:
                 self.pc += 1
                 continue
 
-            # Unknown instruction
-            self.pc += 1
+            # Unknown instruction: fail loudly. Silently skipping it would let an
+            # AI-proposed patch containing a bogus opcode pass the equivalence check.
+            raise RuntimeError(f"Unknown TAC instruction op '{op}' at pc={self.pc}")
 
         if step >= max_steps:
             raise TimeoutError(f"Interpreter exceeded maximum steps limit ({max_steps})")
