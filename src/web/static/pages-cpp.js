@@ -1,5 +1,5 @@
 'use strict';
-/* pages-cpp.js — C++ workspace (check, heal, accept/reject) and the Changes history. */
+/* pages-cpp.js — C++ Studio (run, check, heal, accept/reject) and the Changes history. */
 
 const pendingCount = () => state.proposals.filter(p => p.status === 'pending').length;
 function updateNavCount() {
@@ -30,12 +30,12 @@ function decide(p, action) {
   const s = state.cpp;
   if (action === 'accept') {
     if (s.code !== p.original) return { ok: false, msg: 'Your code changed after this proposal was made, so applying it could overwrite your edits. Run the heal again.' };
-    s.code = p.patched; p.status = 'accepted'; s.result = null;
+    s.code = p.patched; p.status = 'accepted'; s.result = null; saveDraft();
   } else if (action === 'reject') {
     p.status = 'rejected';
   } else if (action === 'undo') {
     if (s.code !== p.patched) return { ok: false, msg: 'The code has been edited since this change was accepted, so undoing it would discard those edits.' };
-    s.code = p.original; p.status = 'undone'; s.result = null;
+    s.code = p.original; p.status = 'undone'; s.result = null; saveDraft();
   }
   if (s.pending === p && p.status !== 'pending') s.pending = null;
   saveProposals(); updateNavCount();
@@ -55,102 +55,88 @@ function StepsList(steps) {
   }));
 }
 
-/* ── C++ Workspace ───────────────────────────────────────────────────── */
-const INPUT_RE = /\bcin\b|\bgetline\s*\(|\bscanf\s*\(|\bgets\s*\(|\bgetchar\s*\(/;
-const CPP_ACCEPT = '.cpp,.cc,.cxx,.c++,.c,.h,.hpp,.hh,.txt';
-const fileSlug = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') + '.cpp';
+/* ── C++ Studio ──────────────────────────────────────────────────────── */
+const CPP_ACCEPT = '.cpp,.cc,.cxx,.c,.h,.hpp,.txt';
+let draftTimer = null;
+function saveDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => store.set('cppDraft', { code: state.cpp.code, name: state.cpp.name }), 300);
+}
+const slug = (n) => (n.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'main') + '.cpp';
 
 function pageWorkspace(root) {
   const s = state.cpp;
-  s.filename = s.filename || 'main.cpp';
-  s.stdin = s.stdin || '';
-  s.tab = s.tab || 'output';
-  if (s.baseline === undefined) s.baseline = s.code;
-  const aiOK = state.status.ai_ready;
-  let working = null;          // null | 'compile' | 'run' | 'heal'
-  let flash = null;            // a one-off message shown at the top of the Output tab
-  let healNote = null;         // "no change proposed" explanation
+  const st = state.status;
+  const aiOK = st.ai_ready;
   let lastDecisionNote = null;
+  let undoLoad = null;
 
-  /* ── editor ── */
-  const cursorInfo = el('span', { text: 'Ln 1, Col 1' });
-  const staleChip = el('span', { class: 'chip warn', hidden: true }, el('i'), 'Edited since last build');
+  /* editor + status bar */
+  const fileChip = el('span', { class: 'filename' });
+  const dirtyChip = el('span', { class: 'chip warn', hidden: true }, el('i'), 'Edited since last compile');
+  const posInfo = el('span', { class: 'faint', text: 'Ln 1, Col 1' });
+  const loadNote = el('div', { class: 'loadnote', hidden: true });
+
   const ed = Editor({
-    value: s.code, label: 'C++ source code',
-    onChange: (v) => { s.code = v; updateStale(); updateInputHint(); },
-    onRun: (e) => (e && e.shiftKey) ? runJob('compile') : runJob('run'),
-    onCursor: (ln, col) => { cursorInfo.textContent = 'Ln ' + ln + ', Col ' + col; },
+    value: s.code, label: 'C++ source code', lang: 'cpp', accept: CPP_ACCEPT,
+    onChange: (v) => {
+      s.code = v; saveDraft();
+      dirtyChip.hidden = !(s.result && v !== s.lastCheckedCode);
+      if (!loadNote.hidden && undoLoad && v !== undoLoad.loaded) loadNote.hidden = true;
+    },
+    onRun: () => run(),
+    onCursor: (c) => { posInfo.textContent = 'Ln ' + c.line + ', Col ' + c.col + (c.selected ? ' (' + c.selected + ' selected)' : ''); },
+    onFile: (r) => r.error ? flash(notice('bad', r.error)) : openText(r.name, r.text),
   });
-  const updateStale = () => { staleChip.hidden = !s.result || s.code === s.lastCheckedCode; };
+  const setName = (n) => { s.name = n; fileChip.textContent = n; saveDraft(); };
+  setName(s.name || 'main.cpp');
 
-  /* ── toolbar ── */
-  const fileName = el('span', { class: 'file-name', text: s.filename });
-  const btnCompile = el('button', { class: 'btn', title: 'Check the code with g++ (Ctrl+Shift+Enter)', onClick: () => runJob('compile') }, 'Compile');
-  const btnRun = el('button', { class: 'btn primary run', title: 'Compile, then run the program (Ctrl+Enter)', onClick: () => runJob('run') },
-    el('span', { 'aria-hidden': 'true', text: '▶' }), 'Compile & Run');
-  const itemRules = el('button', { class: 'menu-item', role: 'menuitem', onClick: (e) => { closeMenu(e); heal('rules'); } },
-    el('b', { text: 'Rule-based fix' }), el('small', { text: 'Fast, works offline' }));
-  const itemAI = el('button', { class: 'menu-item', role: 'menuitem', disabled: !aiOK, onClick: (e) => { closeMenu(e); heal('ai'); } },
-    el('b', { text: 'AI fix (Gemini)' }), el('small', { text: aiOK ? 'Slower, handles harder errors' : 'Needs a Gemini API key' }));
-  const closeMenu = (e) => { const d = e.target.closest('details'); if (d) d.open = false; };
-  const fixMenu = el('details', { class: 'menu' },
-    el('summary', { class: 'btn', title: 'Propose a fix. Nothing changes until you accept.' }, 'Suggest fix ', el('span', { 'aria-hidden': 'true', text: '▾' })),
-    el('div', { class: 'menu-pop', role: 'menu' }, itemRules, itemAI));
-  const allButtons = () => [btnRun, btnCompile, itemRules, itemAI];
-
-  function setFile(name) { s.filename = name; fileName.textContent = name; }
-
-  function loadCode(text, name) {
-    if (s.code.trim() && s.code !== s.baseline && s.code !== text &&
-        !window.confirm('Replace the code in the editor? Your unsaved changes will be lost.')) return;
-    ed.set(text); setFile(name || s.filename); s.baseline = text;
-    s.result = null; s.run = null; s.pending = null; s.lastCheckedCode = null; s.tab = 'output';
-    flash = null; healNote = null; lastDecisionNote = null; ed.mark({});
-    renderResults(); updateStale(); announce('Loaded ' + (name || 'example'));
+  function flash(node) { loadNote.hidden = false; loadNote.replaceChildren(node); }
+  function openText(name, text) {
+    const prev = { code: ed.get(), name: s.name };
+    const had = prev.code.trim() !== '';
+    ed.set(text); setName(name);
+    s.result = null; s.pending = null; s.run = null; s.ast = null; s.lastCheckedCode = null;
+    dirtyChip.hidden = true; ed.mark({}); lastDecisionNote = null;
+    undoLoad = { prev, loaded: text };
+    flash(el('div', { class: 'notice ok loadnote-in', role: 'status' },
+      el('span', null, el('b', { text: 'Opened ' + name + '. ' }), plural(text.split('\n').length, 'line') + '.'),
+      had ? el('button', { class: 'linkish', text: 'Undo', onClick: () => {
+        ed.set(undoLoad.prev.code); setName(undoLoad.prev.name); loadNote.hidden = true; refreshAll(); ed.focus();
+      } }) : null,
+      el('button', { class: 'linkish', text: 'Dismiss', onClick: () => { loadNote.hidden = true; } })));
+    refreshAll(); announce('Opened ' + name);
   }
-  const onFileError = (msg) => { flash = notice('bad', msg); s.tab = 'output'; renderResults(); announce(msg); };
 
-  const loader = FileLoader({ accept: CPP_ACCEPT, label: 'Open file', onLoad: (t, n) => loadCode(t, n), onError: onFileError });
-  const picker = SamplePicker('cpp', (smp) => loadCode(smp.code, fileSlug(smp.name)));
-  const btnSave = el('button', { class: 'btn', title: 'Download the code as a file', onClick: () => {
-    const name = /\.[A-Za-z0-9+]+$/.test(s.filename) ? s.filename : s.filename + '.cpp';
-    downloadText(name, ed.get()); s.baseline = ed.get(); announce('Saved ' + name);
+  /* toolbar */
+  const btnOpen = el('button', { class: 'btn', onClick: async () => {
+    const f = await pickFile(CPP_ACCEPT);
+    if (!f) return;
+    try { const r = await readTextFile(f); openText(r.name, r.text); } catch (e) { flash(notice('bad', e.message)); }
+  } }, 'Open file…');
+  const btnSave = el('button', { class: 'btn', onClick: () => {
+    let n = (s.name || 'main.cpp').trim() || 'main.cpp';
+    saveTextFile(n, ed.get()); announce('Saved ' + n);
   } }, 'Save');
+  const samples = SamplePicker('cpp', (smp) => openText(slug(smp.name), smp.code));
+  const btnRun = el('button', { class: 'btn primary', title: 'Compile and run (Ctrl+Enter)', onClick: () => run() }, el('span', { 'aria-hidden': 'true', text: '▶' }), 'Run');
+  const btnCompile = el('button', { class: 'btn', title: 'Compile only, no run', onClick: () => compile() }, 'Compile');
+  const btnRules = el('button', { class: 'btn', title: 'Try the built-in repair rules. You review the diff first.', onClick: () => heal('rules') }, 'Fix with rules');
+  const btnAI = el('button', { class: 'btn', disabled: !aiOK, title: aiOK ? 'Ask the Gemini agent. You review the diff first.' : 'Needs a Gemini API key (see the status bar above)', onClick: () => heal('ai') }, 'Fix with AI');
+  const all = () => [btnRun, btnCompile, btnRules, btnAI];
 
-  /* ── program input ── */
-  const inputHint = el('span', { class: 'chip warn', hidden: true }, el('i'), 'Your program reads input');
-  const stdinArea = el('textarea', { class: 'stdin-area', spellcheck: 'false', rows: '3', placeholder: 'Type what the program should read, one value per line, for example:\n12\n30', 'aria-label': 'Program input' });
-  stdinArea.value = s.stdin;
-  stdinArea.addEventListener('input', () => { s.stdin = stdinArea.value; updateInputHint(); });
-  const stdinBox = el('details', { class: 'stdin-box', open: !!s.stdin },
-    el('summary', null, 'Program input (stdin)', inputHint), stdinArea);
-  function updateInputHint() { inputHint.hidden = !(INPUT_RE.test(s.code) && !s.stdin.trim()); }
-
-  /* ── results tabs ── */
-  const TABS = [['output', 'Output'], ['problems', 'Problems'], ['fix', 'Fix']];
-  const tabBtn = {}, badge = {};
-  const tabList = el('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Results' });
-  const panel = el('div', { class: 'tabpanel results-body', role: 'tabpanel', tabindex: '0' });
-  TABS.forEach(([id, label], i) => {
-    badge[id] = el('span', { class: 'badge', hidden: true });
-    const b = el('button', { class: 'tab', role: 'tab', id: 'rtab-' + id, onClick: () => { s.tab = id; renderResults(); } }, label, badge[id]);
-    b.addEventListener('keydown', (e) => {
-      const k = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-      if (k) { e.preventDefault(); s.tab = TABS[(i + k + TABS.length) % TABS.length][0]; renderResults(); tabBtn[s.tab].focus(); }
-    });
-    tabBtn[id] = b; tabList.append(b);
-  });
-
-  function renderResults() {
-    const r = s.result;
-    TABS.forEach(([id]) => { tabBtn[id].setAttribute('aria-selected', String(id === s.tab)); tabBtn[id].tabIndex = id === s.tab ? 0 : -1; });
-    const n = r ? r.error_count + r.warning_count : 0;
-    badge.problems.hidden = !n; badge.problems.textContent = String(n);
-    badge.problems.className = 'badge' + (r && r.error_count ? ' bad' : ' warn');
-    badge.fix.hidden = !(s.pending && s.pending.status === 'pending'); badge.fix.textContent = '1'; badge.fix.className = 'badge ok';
-    panel.setAttribute('aria-labelledby', 'rtab-' + s.tab);
-    panel.replaceChildren(s.tab === 'problems' ? problemsView() : s.tab === 'fix' ? fixView() : outputView());
-  }
+  /* right-hand panes */
+  const problemsHost = el('div'), outputHost = el('div'), reviewHost = el('div'), astHost = el('div');
+  const reviewBadge = el('span', { class: 'count', hidden: true, text: '1' });
+  const probBadge = el('span', { class: 'count bad', hidden: true });
+  const tabs = Tabs([
+    { id: 'problems', label: el('span', { class: 'tab-l' }, 'Problems', probBadge), render: () => problemsHost },
+    { id: 'output', label: 'Output', render: () => outputHost },
+    { id: 'ast', label: 'Syntax tree', render: () => { loadAst(); return astHost; } },
+    { id: 'review', label: el('span', { class: 'tab-l' }, 'Review fix', reviewBadge), render: () => reviewHost },
+  ], 'problems');
+  tabs.list.addEventListener('click', () => { s.tab = tabs.current; });
+  const show = (id) => { s.tab = id; tabs.select(id); };
 
   function markEditor(r) {
     const m = {};
@@ -160,189 +146,211 @@ function pageWorkspace(root) {
     }
     ed.mark(m);
   }
-
-  /* ── Output tab ── */
-  function workingView() {
-    const text = working === 'run' ? 'Compiling and running…' : working === 'heal' ? 'Looking for a fix…' : 'Compiling…';
-    return el('div', { class: 'working', role: 'status' }, el('span', { class: 'spinner', 'aria-hidden': 'true' }), text);
+  function setResult(r, code) {
+    s.result = r; s.lastCheckedCode = code; dirtyChip.hidden = true; s.ast = null;
+    markEditor(r); renderProblems();
   }
 
-  function consoleView(run) {
-    const hasOut = run.stdout.length > 0, hasErr = run.stderr.length > 0;
-    let chip;
-    if (run.timed_out) chip = el('span', { class: 'chip bad' }, el('i'), 'Stopped after ' + run.timeout_s + ' s');
-    else if (run.output_flood) chip = el('span', { class: 'chip bad' }, el('i'), 'Stopped: too much output');
-    else if (run.signal) chip = el('span', { class: 'chip bad' }, el('i'), 'Crashed · ' + run.signal);
-    else if (run.exit_code === 0) chip = el('span', { class: 'chip ok' }, el('i'), 'Exited with code 0');
-    else chip = el('span', { class: 'chip warn' }, el('i'), 'Exited with code ' + run.exit_code);
-    const warns = s.result && s.result.warning_count;
-    const notes = [];
-    if (run.timed_out) notes.push(notice('warn', el('b', { text: 'Your program did not finish. ' }),
-      INPUT_RE.test(s.code) && !s.stdin.trim()
-        ? 'It reads input but none was given. Add values in “Program input” above and run again.'
-        : 'It may contain an infinite loop, or be waiting for input.'));
-    if (run.signal_hint) notes.push(notice('bad', run.signal_hint));
-    if (run.truncated) notes.push(notice('warn', 'Output was cut at 64 KB.'));
-    return el('div', { class: 'stack-sm' },
-      el('div', { class: 'run-meta' }, chip, el('span', { class: 'faint', text: run.elapsed_ms + ' ms' }),
-        warns ? el('button', { class: 'linkish', text: plural(warns, 'warning'), onClick: () => { s.tab = 'problems'; renderResults(); } }) : null),
-      el('div', { class: 'console', role: 'log', tabindex: '0', 'aria-label': 'Program output' },
-        hasOut && hasErr ? el('div', { class: 'c-label', text: 'stdout' }) : null,
-        hasOut ? el('pre', { class: 'c-out', text: run.stdout }) : null,
-        hasErr ? el('div', { class: 'c-label', text: 'stderr' }) : null,
-        hasErr ? el('pre', { class: 'c-err', text: run.stderr }) : null,
-        !hasOut && !hasErr ? el('span', { class: 'c-dim', text: '(the program printed nothing)' }) : null),
-      notes);
-  }
-
-  function outputView() {
-    if (working) return workingView();
+  /* Problems */
+  function renderProblems() {
     const r = s.result;
-    const parts = [flash];
+    problemsHost.replaceChildren();
+    probBadge.hidden = !(r && r.error_count); probBadge.textContent = r ? String(r.error_count) : '';
     if (!r) {
-      parts.push(el('div', { class: 'empty' },
-        el('b', { text: 'Nothing has run yet' }),
-        'Press ', el('b', { text: 'Compile & Run' }), ' to build and run your program, or ', el('b', { text: 'Compile' }),
-        ' to only check it. Output appears here.'));
-    } else if (!r.ok) {
-      parts.push(notice('bad', el('b', { text: 'Build failed. ' }), plural(r.error_count, 'error') + ' to fix before the program can run. '),
-        el('p', { style: 'margin-top:12px' }, el('button', { class: 'btn', onClick: () => { s.tab = 'problems'; renderResults(); } }, 'See problems')));
-    } else if (!s.run) {
-      parts.push(notice('ok', el('b', { text: 'Compiled successfully' }), r.warning_count ? ' with ' + plural(r.warning_count, 'warning') + '.' : '. No errors or warnings.'),
-        el('p', { class: 'muted', style: 'margin-top:12px', text: 'Press Compile & Run to run it.' }));
-    } else {
-      parts.push(consoleView(s.run));
+      problemsHost.append(el('div', { class: 'empty' }, el('b', { text: 'Not compiled yet' }),
+        'Press Run to build and run your program, or Compile to only check it. Errors show up here with a plain-language explanation.'));
+      return;
     }
-    return el('div', null, parts);
+    problemsHost.append(el('div', { class: 'summary ' + (r.ok ? 'good' : 'bad') },
+      el('b', { text: r.ok ? (r.warning_count ? 'Compiles, with ' + plural(r.warning_count, 'warning') : 'Compiles cleanly') : plural(r.error_count, 'error') + (r.warning_count ? ', ' + plural(r.warning_count, 'warning') : '') }),
+      el('span', { class: 'faint', text: r.elapsed_s + ' s' })));
+    if (!r.ok) problemsHost.append(el('div', { class: 'fixbar' }, el('span', { class: 'muted', text: 'Want help?' }),
+      el('button', { class: 'btn', onClick: () => heal('rules') }, 'Fix with rules'),
+      el('button', { class: 'btn', disabled: !aiOK, onClick: () => heal('ai') }, 'Fix with AI')));
+    if (!r.diagnostics.length) problemsHost.append(el('div', { class: 'empty' }, el('b', { text: 'No problems' }), 'g++ reported nothing for this file.'));
+    r.diagnostics.forEach(d => problemsHost.append(Diagnostic(d, ed)));
+    if (r.security && r.security.length) {
+      problemsHost.append(el('div', { class: 'section-title pad', text: 'Security findings (' + r.security.length + ')' }));
+      r.security.forEach(f => problemsHost.append(SecurityItem(f, ed)));
+    }
   }
 
-  /* ── Problems tab ── */
-  function problemsView() {
-    const r = s.result;
-    if (!r) return el('div', { class: 'empty' }, el('b', { text: 'No problems to show' }), 'Compile your code and any errors or warnings are listed here, explained in plain language.');
-    const head = el('div', { class: 'prob-head' },
-      el('h2', { text: r.ok ? (r.warning_count ? 'Compiles, with warnings' : 'No problems found') : plural(r.error_count, 'error') + (r.warning_count ? ', ' + plural(r.warning_count, 'warning') : '') }),
-      el('span', { class: 'faint', text: r.elapsed_s + ' s' }));
-    const list = el('div', { class: 'prob-list' });
-    if (!r.diagnostics.length) list.append(el('div', { class: 'empty' }, el('b', { text: 'No diagnostics' }), 'g++ reported nothing for this file.'));
-    r.diagnostics.forEach(d => list.append(Diagnostic(d, ed)));
-    const secs = el('div');
-    if (r.security.length) {
-      secs.append(el('div', { class: 'section-title', text: 'Security findings · ' + r.security.length }));
-      r.security.forEach(f => secs.append(SecurityItem(f, ed)));
+  /* Output */
+  const stdinBox = el('textarea', { class: 'stdin', rows: '3', spellcheck: 'false', 'aria-label': 'Program input (stdin)', placeholder: 'Type input here if your program reads from the keyboard (cin, scanf…). Each line is one Enter press.' });
+  stdinBox.value = s.stdin || '';
+  stdinBox.addEventListener('input', () => { s.stdin = stdinBox.value; });
+  const consoleHost = el('div');
+  function renderOutput() {
+    const r = s.run;
+    consoleHost.replaceChildren();
+    if (!r) {
+      consoleHost.append(el('div', { class: 'empty' }, el('b', { text: 'Nothing has run yet' }), 'Press Run. The program’s output appears here.'));
+      return;
     }
-    return el('div', null, head, list, secs);
+    const chips = [];
+    if (r.timed_out) chips.push(['bad', 'Stopped after ' + st.run_timeout_s + ' s (still running)']);
+    else if (r.truncated) chips.push(['warn', 'Stopped: too much output']);
+    else if (r.crashed) chips.push(['bad', 'Crashed (exit code ' + r.exit_code + ')']);
+    else chips.push([r.exit_code === 0 ? 'ok' : 'warn', 'Exited with code ' + r.exit_code]);
+    chips.push(['plain', r.run_s + ' s']);
+    consoleHost.append(el('div', { class: 'chips' }, chips.map(([k, t]) => el('span', { class: 'chip ' + k }, el('i'), t))));
+    consoleHost.append(el('div', { class: 'section-title', text: 'Output' }),
+      el('pre', { class: 'console', tabindex: '0', 'aria-label': 'Program output', text: r.stdout || (r.stderr ? '' : '(no output)') }));
+    if (r.stderr) consoleHost.append(el('div', { class: 'section-title', text: 'Error stream (stderr)' }), el('pre', { class: 'console err', tabindex: '0', text: r.stderr }));
+    if (r.timed_out) consoleHost.append(el('p', { class: 'faint', style: 'margin-top:8px', text: 'Likely an infinite loop, or the program is waiting for input that was not provided. Add input above and run again.' }));
+  }
+  function renderOutputPane() {
+    outputHost.replaceChildren(
+      el('div', { class: 'pad' },
+        el('label', { class: 'field-label', for: 'stdin-box' }, 'Input for the program'), stdinBox,
+        consoleHost,
+        el('p', { class: 'faint', style: 'margin-top:12px', text: 'Run compiles your code and runs it on this computer with a ' + st.run_timeout_s + ' s limit. Only run code you trust.' })));
+    stdinBox.id = 'stdin-box';
+    renderOutput();
   }
 
-  /* ── Fix tab ── */
-  function fixView() {
-    if (working === 'heal') return workingView();
+  /* Syntax tree (C++ via clang) */
+  let astTree = null;
+  async function loadAst() {
+    const code = ed.get();
+    if (!code.trim()) { astHost.replaceChildren(el('div', { class: 'empty' }, el('b', { text: 'No code' }), 'Write or open some C++ first.')); return; }
+    if (s.ast && s.ast.code === code) { paintAst(s.ast.data); return; }
+    if (!st.clang) {
+      astHost.replaceChildren(el('div', { class: 'pad' }, notice('warn', el('b', { text: 'The C++ syntax tree needs clang++. ' }),
+        'It is not installed or not on PATH. On Windows with MSYS2: run pacman -S mingw-w64-ucrt-x86_64-clang, add C:\\msys64\\ucrt64\\bin to PATH, then restart this server.')));
+      return;
+    }
+    astHost.replaceChildren(el('p', { class: 'pad muted', text: 'Parsing with clang…' }));
+    try {
+      const d = await call('/api/cpp/ast', { code });
+      s.ast = { code, data: d };
+      if (tabs.current === 'ast') paintAst(d);
+    } catch (e) { astHost.replaceChildren(el('div', { class: 'pad' }, notice('bad', e.message))); }
+  }
+  function paintAst(d) {
+    astTree = TreeView(d.tree.map(normClang));
+    const q = el('input', { type: 'search', placeholder: 'Filter nodes…', 'aria-label': 'Filter syntax tree nodes' });
+    const info = el('span', { class: 'faint' });
+    q.addEventListener('input', () => { const n = astTree.filter(q.value); info.textContent = q.value.trim() ? plural(n, 'match') : ''; });
+    astHost.replaceChildren(
+      el('div', { class: 'treebar' }, q, info,
+        el('button', { class: 'btn quiet', onClick: () => astTree.setAll(true) }, 'Expand all'),
+        el('button', { class: 'btn quiet', onClick: () => astTree.setAll(false) }, 'Collapse all')),
+      el('div', { class: 'pad tree-scroll' }, astTree.root),
+      el('p', { class: 'pad faint', text: plural(astTree.count, 'node') + ' · from clang -ast-dump, limited to your file. Even code with errors may give a partial tree.' }));
+  }
+
+  /* Review */
+  function renderReview() {
     const p = s.pending;
-    const parts = [lastDecisionNote];
+    reviewHost.replaceChildren();
+    reviewBadge.hidden = !p;
+    if (lastDecisionNote) reviewHost.append(el('div', { class: 'pad' }, lastDecisionNote));
     if (!p) {
-      parts.push(healNote || el('div', { class: 'empty' },
-        el('b', { text: 'No fix proposed' }),
-        'Choose ', el('b', { text: 'Suggest fix' }), ' in the toolbar. You will review a diff here, and nothing changes until you accept it.'));
-      return el('div', null, parts);
+      if (!lastDecisionNote) reviewHost.append(el('div', { class: 'empty' }, el('b', { text: 'No fix to review' }),
+        'Use Fix with rules or Fix with AI. The proposed change appears here as a diff. Nothing touches your code until you accept it.'));
+      return;
     }
-    const st = diffStats(p.diff);
+    const d = diffStats(p.diff);
+    const warn = st.llm_mock && p.mode === 'ai' ? notice('warn', el('b', { text: 'Mock mode: ' }), 'this is a canned response, not a real fix for your code.') : null;
     const msgHost = el('div');
     const accept = el('button', { class: 'btn primary', onClick: () => {
       const res = decide(p, 'accept');
       if (!res.ok) { msgHost.replaceChildren(notice('bad', res.msg)); return; }
-      ed.set(s.code); ed.mark({});
-      lastDecisionNote = notice('ok', el('b', { text: 'Change accepted. ' }), 'Editor updated. You can undo it from Changes.');
-      announce('Change accepted'); runJob('compile');
+      ed.set(s.code); ed.mark({}); lastDecisionNote = notice('ok', el('b', { text: 'Change accepted. ' }), 'Your code was updated. You can undo it from Changes.');
+      renderReview(); announce('Change accepted'); compile(true);
     } }, 'Accept change');
     const reject = el('button', { class: 'btn', onClick: () => {
-      decide(p, 'reject'); lastDecisionNote = notice('', 'Change rejected. Your code is unchanged.'); renderResults(); announce('Change rejected');
+      decide(p, 'reject'); lastDecisionNote = notice('', 'Change rejected. Your code is unchanged.'); renderReview(); announce('Change rejected');
     } }, 'Reject');
-    parts.push(
-      el('div', { class: 'run-meta' },
+    reviewHost.append(el('div', { class: 'pad' },
+      el('div', { class: 'chips' },
         el('span', { class: 'chip plain' }, p.kind),
         el('span', { class: 'chip ' + (p.compiles ? 'ok' : 'warn') }, el('i'), p.compiles ? 'Compiles after change' : 'Still has errors after change')),
-      state.status.llm_mock && p.mode === 'ai' ? notice('warn', el('b', { text: 'Mock mode: ' }), 'this result is a canned response, not a real fix for your code.') : null,
+      warn && el('div', { style: 'height:12px' }), warn,
       el('div', { style: 'height:12px' }),
       StepsList(p.steps),
       p.summary && el('p', { class: 'muted', text: p.summary, style: 'margin-bottom:12px' }),
-      el('p', { class: 'faint', style: 'margin-bottom:8px', text: '+' + st.add + ' added, −' + st.del + ' removed. Nothing changes until you accept.' }),
+      el('p', { class: 'faint', style: 'margin-bottom:8px', text: '+' + d.add + ' added, −' + d.del + ' removed. Nothing changes until you accept.' }),
       DiffView(p.diff),
-      el('div', { class: 'decision' }, accept, reject), msgHost);
-    return el('div', null, parts);
+      el('div', { class: 'decision' }, accept, reject), msgHost));
   }
 
-  /* ── actions ── */
-  async function runJob(kind) {
+  function refreshAll() { renderProblems(); renderOutputPane(); renderReview(); dirtyChip.hidden = true; if (tabs.current === 'ast') loadAst(); }
+
+  /* actions */
+  const needCode = () => { if (ed.get().trim()) return true; show('problems'); problemsHost.replaceChildren(el('div', { class: 'pad' }, notice('warn', 'The editor is empty. Open a file, load an example, or type some code.'))); return false; };
+
+  async function compile(quiet) {
+    if (!needCode()) return;
     const code = ed.get();
-    flash = null;
-    if (!code.trim()) { flash = notice('warn', 'Write, open or load some code first.'); s.tab = 'output'; renderResults(); return; }
-    if (kind === 'run' && INPUT_RE.test(code) && !s.stdin.trim()) stdinBox.open = true;
-    working = kind; s.tab = 'output'; renderResults();
-    await busy(kind === 'run' ? allButtons() : [btnCompile, btnRun, itemRules, itemAI], async () => {
+    await busy([btnCompile, btnRun, btnRules, btnAI], async () => {
       try {
-        if (kind === 'run') {
-          const d = await call('/api/cpp/run', { code, stdin: s.stdin });
-          s.result = d.analysis; s.run = d.run;
-        } else {
-          s.result = await call('/api/cpp/analyze', { code }); s.run = null;
-        }
-        s.lastCheckedCode = code; markEditor(s.result);
-        s.tab = s.result.ok ? 'output' : 'problems';
-        announce(s.result.ok ? (kind === 'run' ? 'Program finished' : 'Compiled successfully') : plural(s.result.error_count, 'error') + ' found');
-      } catch (e) { s.result = null; s.run = null; flash = notice('bad', e.message); s.tab = 'output'; }
-      finally { working = null; }
+        const r = await call('/api/cpp/compile', { code });
+        setResult(r, code);
+        if (!quiet) show('problems');
+        announce(r.ok ? 'Compiles' : plural(r.error_count, 'error') + ' found');
+      } catch (e) { show('problems'); problemsHost.replaceChildren(el('div', { class: 'pad' }, notice('bad', e.message))); }
     });
-    renderResults(); updateStale();
+  }
+
+  async function run() {
+    if (!needCode()) return;
+    if (!st.run_enabled) { show('output'); consoleHost.replaceChildren(notice('bad', 'Running is switched off because the server is not limited to this computer.')); return; }
+    const code = ed.get();
+    await busy([btnRun, btnCompile, btnRules, btnAI], async () => {
+      try {
+        const r = await call('/api/cpp/run', { code, stdin: stdinBox.value });
+        setResult(r, code);
+        if (!r.ran) { show('problems'); announce(plural(r.error_count, 'error') + ' found. The program did not run.'); return; }
+        s.run = r; renderOutput(); show('output');
+        announce('Program finished with exit code ' + r.exit_code);
+      } catch (e) { show('problems'); problemsHost.replaceChildren(el('div', { class: 'pad' }, notice('bad', e.message))); }
+    });
   }
 
   async function heal(mode) {
+    if (!needCode()) return;
     const code = ed.get();
-    if (!code.trim()) { flash = notice('warn', 'Write, open or load some code first.'); s.tab = 'output'; renderResults(); return; }
-    lastDecisionNote = null; healNote = null;
-    working = 'heal'; s.tab = 'fix'; renderResults();
-    await busy(allButtons(), async () => {
+    lastDecisionNote = null;
+    await busy([mode === 'ai' ? btnAI : btnRules, btnRun, btnCompile, mode === 'ai' ? btnRules : btnAI], async () => {
       try {
         const r = await call('/api/cpp/heal', { mode, code });
         if (!r.changed) {
           s.pending = null;
-          healNote = el('div', null,
-            notice(r.compiles ? 'ok' : 'warn', el('b', { text: 'No change proposed. ' }),
-              r.compiles ? 'The code already compiles, so there is nothing to fix.' : 'No automatic fix was found for the remaining problems. Read the explanations in Problems and edit the code, or try the AI fix.'),
-            el('div', { style: 'height:12px' }), StepsList(r.steps));
-          if (!r.compiles) { s.result = await call('/api/cpp/analyze', { code }); s.run = null; s.lastCheckedCode = code; markEditor(s.result); }
-          announce('No change proposed');
-        } else {
-          createProposal(r); announce('A change is proposed. Review the diff.');
+          lastDecisionNote = el('div', null, el('b', { text: 'No change proposed. ' }),
+            r.compiles ? 'The code already compiles, so there is nothing to fix.' : 'No automatic fix was found for the remaining problems. Read the explanations in Problems and edit the code, or try the AI fix.');
+          if (!r.compiles) { const a = await call('/api/cpp/compile', { code }); setResult(a, code); }
+          renderReview(); reviewHost.append(el('div', { class: 'pad' }, StepsList(r.steps)));
+          show(r.compiles ? 'review' : 'problems'); announce('No change proposed');
+          return;
         }
-      } catch (e) { healNote = notice('bad', e.message); s.pending = null; }
-      finally { working = null; }
+        createProposal(r); renderReview(); show('review'); announce('A change is proposed. Review the diff.');
+      } catch (e) { reviewHost.replaceChildren(el('div', { class: 'pad' }, notice('bad', e.message))); show('review'); }
     });
-    renderResults(); updateStale();
   }
 
-  /* ── layout ── */
-  const editorWrap = el('div', { class: 'editor-wrap' }, ed.root,
-    el('div', { class: 'drop-hint', 'aria-hidden': 'true' }, el('b', { text: 'Drop a C++ file to open it' }), el('span', { text: '.cpp  .cc  .cxx  .h  .hpp  .txt' })));
-  enableFileDrop(editorWrap, (t, n) => loadCode(t, n), onFileError);
-
   root.append(
-    el('div', { class: 'page-head compact' },
-      el('div', null, el('h1', { text: 'C++ workspace' }),
-        el('p', { text: 'Write or open a C++ file, build it with g++, run it, and get every problem explained.' })),
-      el('div', { class: 'actions build-actions', role: 'group', 'aria-label': 'Build' }, fixMenu, btnCompile, btnRun)),
-    !aiOK && el('p', { class: 'faint', style: 'margin:-12px 0 16px', text: 'AI fixes are off because no Gemini key is configured. Rule-based fixes work without one.' }),
-    el('div', { class: 'ws' },
-      el('section', { class: 'panel ide', 'aria-label': 'Code editor' },
-        el('div', { class: 'toolbar', role: 'toolbar', 'aria-label': 'Editor actions' },
-          el('span', { class: 'file-pill' }, el('span', { 'aria-hidden': 'true', text: '▤' }), fileName),
-          loader, picker, btnSave),
-        editorWrap, stdinBox,
-        el('div', { class: 'panel-foot' },
-          el('span', { class: 'foot-left' }, cursorInfo, staleChip),
-          el('span', { text: 'Ctrl+Enter run · Ctrl+Shift+Enter compile only · Esc then Tab leaves the editor' }))),
-      el('section', { class: 'panel results', 'aria-label': 'Results' }, tabList, panel)));
-  renderResults(); updateStale(); updateInputHint();
+    el('div', { class: 'studio-head' },
+      el('div', null, el('h1', { text: 'C++ Studio' }),
+        el('p', { text: 'Open or write C++, then Run it. If it does not compile, the errors are explained and a fix can be reviewed before it touches your code.' }))),
+    el('div', { class: 'toolbar', role: 'toolbar', 'aria-label': 'C++ actions' },
+      el('div', { class: 'tb-group' }, btnRun, btnCompile),
+      el('div', { class: 'tb-sep', 'aria-hidden': 'true' }),
+      el('div', { class: 'tb-group' }, btnRules, btnAI),
+      el('div', { class: 'tb-spacer' }),
+      el('div', { class: 'tb-group' }, btnOpen, btnSave, samples)),
+    !aiOK && el('p', { class: 'faint note-line', text: 'Fix with AI is off because no Gemini key is set. Run, Compile and Fix with rules work without one.' }),
+    el('div', { class: 'studio' },
+      el('section', { class: 'panel editor-panel', 'aria-label': 'Editor' },
+        el('div', { class: 'editor-bar' }, fileChip, dirtyChip),
+        loadNote, ed.root,
+        el('div', { class: 'panel-foot' }, posInfo, el('span', { text: 'Ctrl+Enter runs · drop a file here to open it' }))),
+      el('section', { class: 'panel result-panel', 'aria-label': 'Results' }, tabs.list, tabs.panel)));
+
+  renderProblems(); renderOutputPane(); renderReview();
   if (s.result) markEditor(s.result);
+  if (s.pending) tabs.select('review'); else if (s.tab && s.tab !== 'problems') tabs.select(s.tab);
 }
 
 function Diagnostic(d, ed) {
@@ -380,7 +388,7 @@ function pageChanges(root) {
     const list = state.proposals.slice().reverse();
     if (!list.length) {
       host.append(el('div', { class: 'panel' }, el('div', { class: 'empty' }, el('b', { text: 'No proposed changes yet' }),
-        'When a fix is suggested in the C++ workspace it appears here with its diff. Nothing is applied until you accept it, and accepted changes can be undone.')));
+        'When a fix is suggested in C++ Studio it appears here with its diff. Nothing is applied until you accept it, and accepted changes can be undone.')));
       return;
     }
     list.forEach(p => {

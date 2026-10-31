@@ -5,85 +5,62 @@
 [![Compiler](https://img.shields.io/badge/Backend-GCC%20%7C%20Clang-green.svg)](https://gcc.gnu.org/)
 [![LLM](https://img.shields.io/badge/AI-Google%20Gemini-orange.svg)](https://ai.google.dev/)
 [![GUI](https://img.shields.io/badge/GUI-PyQt6-brightgreen.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![Tests](https://img.shields.io/badge/Pytest-161%20Passed-success.svg)](file:///w:/Projects/toacd-pbl/tests)
+[![Tests](https://img.shields.io/badge/Pytest-70%20Passed-success.svg)](file:///w:/Projects/toacd-pbl/tests)
 
-An enterprise-grade, academic Compiler Design (PBL) platform combining classical compiler construction with modern autonomous agentic AI and dynamic differential execution verification.
+An enterprise-grade, academic Compiler Design (PBL) platform combining standard C++ compiler toolchains (`g++`, `clang++`) with multi-tier autonomous self-healing, machine-learning diagnostic classification, strict AI security guardrails, energy telemetry, interactive PyQt6 workstation, and a modern Web Studio.
 
 ---
 
 ## 1. System Overview
 
-The platform addresses two foundational challenges in compiler design and developer tooling:
+The platform addresses core challenges in modern compiler engineering, developer tooling, and automated program repair (APR):
 
-1. **Autonomous Self-Healing:** Intercepting C++ compilation errors from `g++`/`clang++`, classifying semantic root causes via machine learning, and generating verified source patches using a tiered autonomous agent (`CompilerAgent`) hardened against prompt injection and trojan injection via the `AAIGuardrail`.
-2. **AI-Driven Optimization with Soundness Testing:** Applying large language models (`gemini-flash-lite-latest`) to low-level Three-Address Code (TAC) intermediate representations under the architectural principle: **"AI Proposes, Classic Compiler Verifies"**. Candidate optimizations are tested dynamically against the software TAC Interpreter Oracle before admission to ensure identical observable runtime output.
+1. **Intelligent Compiler Wrapping & Diagnostic Capture:** Intercepts raw `stderr` streams from `g++`/`clang++`, normalizes diagnostic messages into structured records, and classifies semantic error categories using machine learning.
+2. **Two-Tier Autonomous Self-Healing:**
+   - **Tier 1 (Deterministic Rule-Based Healer):** High-speed regex and AST-guided fixes for common syntax errors (missing semicolons, misplaced braces, typo keywords, header mappings).
+   - **Tier 2 (Autonomous ReAct Gemini Agent):** Multi-step contextual repair powered by Google Gemini (`gemini-flash-lite-latest`), analyzing compiler diagnostics and validating candidate fixes iteratively with `g++`.
+3. **Interactive Diff Review:** No changes are applied silently; proposed patches are presented as reviewable visual diffs requiring explicit user acceptance or rejection.
+4. **Security Hardening & Guardrails:** Hardened against prompt injection (ingress) and trojan/backdoor payload insertion (egress) via `AAIGuardrail`, supplemented by static AST-less security analysis.
+5. **Unified Workstations:** Provides both an 6-page PyQt6 desktop GUI and a local browser-based Web Studio for editing, compiling, AST inspection, diff reviews, and live benchmark evidence.
 
 ---
 
 ## 2. Architecture & Design
 
+The platform operates as an intelligent meta-layer over `g++`/`clang++`:
+
 ```mermaid
 flowchart TD
-    subgraph Inputs["Source Input Layer"]
-        CppCode["C++ Source Files (.cpp)"]
-        MiniCCode["MiniC Source Files (.c)"]
+    subgraph CorePipeline["C++ Compilation & Self-Healing Pipeline"]
+        Src["C++ Source (.cpp)"] --> GXX["g++ Runner / Toolchain"]
+        GXX -->|"stderr"| Parser["Error Parser & Normalizer"]
+        Parser --> Classifier["ML Error Classifier (TF-IDF + SGD)"]
+        Classifier --> Explainer["Error Explainer + Glossary"]
+        Explainer --> Tier1["Tier 1: Rule-Based Healer (auto_healer.py)"]
+        Tier1 -.->|"If Unresolved"| Tier2["Tier 2: Gemini Agent (agentic_compiler.py)"]
+        Tier1 --> Diff["Diff Review (Accept / Reject)"]
+        Tier2 --> Diff
+        Diff -->|"Approved Patch"| Src
     end
 
-    subgraph Security["AAI Guardrail Perimeter"]
-        Ingress["Ingress Scanner: Prompt Injection & Tool Suppression Filter"]
-        Egress["Egress Scanner: Trojan Backdoor & System-Call Gatekeeper"]
+    subgraph SideComponents["Security, AI & Analysis Subsystems"]
+        Guardrail["AAI Guardrail (Ingress & Egress Security)"]
+        LLM["LLM Client (Gemini API / Offline Mock / Cache)"]
+        Sec["Static Security Analyzer (Vulnerabilities & Leaks)"]
+        ClangAST["Clang AST Extractor (clang++ -ast-dump)"]
+        Benchmark["Benchmark Harness (51 C++ Fixtures)"]
     end
 
-    subgraph CppPipeline["C++ Diagnostic & Self-Healing Pipeline"]
-        GCC["g++ Toolchain / clang++ AST"]
-        DiagP["Diagnostic Capture Engine (stderr)"]
-        Classifier["ML Error Classifier (TF-IDF + SGD)"]
-        Agent["CompilerAgent (3-Tier Autonomous Healing)"]
-        Telemetry["CodeCarbon & RAPL Energy Telemetry"]
+    subgraph Presentation["User Interfaces"]
+        Diff --> Desktop["PyQt6 Workstation GUI (src/gui.py)"]
+        Diff --> Web["Web Studio (src/web/server.py)"]
     end
 
-    subgraph MiniCPipeline["MiniC Pedagogical Core (src/core/)"]
-        Lexer["Tokenizing Lexer"]
-        Parser["Recursive Descent Parser (Typed AST)"]
-        Sem["Semantic Analyzer & Scoped Symbol Table"]
-        IRGen["Three-Address Code (TAC) Quadruple Generator"]
-        Opt["5 Classical Optimization Passes"]
-        Interp["Virtual Stack/Register TAC Interpreter (Oracle)"]
-    end
-
-    subgraph AIPlatform["AI Intelligence Platform (src/ai/)"]
-        LLM["LLMClient (Gemini REST / Offline Mock / SHA-256 Cache)"]
-        Schema["SchemaValidator (1-Retry Repair Loop & Fallback)"]
-        Explainer["Phase Explainer (Tokens, AST, SymTab, IR)"]
-        AIOpt["AI TAC Optimizer (Propose -> Verify -> Commit)"]
-        BugDet["Bug Detector (AST-Validated Line Citations)"]
-    end
-
-    subgraph UI["PyQt6 Workstation GUI (src/gui.py)"]
-        Pages["8 Sidebar Pages (Editor, AST, Energy, ML, MiniC 5-Tab Pipeline, AI Insights)"]
-    end
-
-    %% Flow connections
-    CppCode --> GCC
-    GCC --> DiagP
-    DiagP --> Classifier
-    Classifier --> Ingress
-    Ingress --> Agent
-    Agent --> LLM
-    LLM --> Egress
-    Egress -->|"Safe Patches"| CppCode
-
-    MiniCCode --> Lexer
-    Lexer --> Parser
-    Parser --> Sem
-    Sem --> IRGen
-    IRGen --> Opt
-    Opt --> Interp
-
-    IRGen -.->|"IR"| AIOpt
-    AIOpt --> LLM
-    LLM -.->|"Candidate IR"| Interp
-    Interp -->|"Dynamic Match"| Opt
+    Tier2 <--> Guardrail
+    Guardrail <--> LLM
+    Src -.-> Sec
+    Src -.-> ClangAST
+    CorePipeline -.-> Benchmark
 ```
 
 ---
@@ -91,33 +68,26 @@ flowchart TD
 ## 3. Core Packages & Components
 
 ### 3.1 C++ Self-Healing & Security Subsystem
-- **`src/compiler_runner.py`**: Safe toolchain discovery and diagnostic capture engine. Sanitizes inputs against forbidden OS primitives (`system`, `popen`, `exec`, raw assembly).
-- **`src/error_classifier.py`**: Multi-class machine learning classifier (TF-IDF + SGD/Logistic Regression) categorizing GCC diagnostics into 8 semantic error types.
-- **`src/auto_healer.py`**: Rule-based deterministic heuristic engine performing localized regex AST corrections.
-- **`src/agentic_compiler.py`**: Multi-tier autonomous healing agent coordinating localized heuristics (Tier 1), contextual LLM reasoning (Tier 2), and global architectural refactoring (Tier 3).
+- **`src/compiler_runner.py`**: Safe toolchain discovery and diagnostic capture engine. Discovers `g++` on PATH or MinGW/MSYS2 locations and sanitizes inputs against forbidden OS primitives (`system`, `popen`, `exec`, raw assembly).
+- **`src/error_parser.py`**: Decomposes raw compiler diagnostics into structured `CompilerError` records with line/column pointers and visual source context.
+- **`src/error_normalizer.py`**: Abstract token normalizer creating dataset representations for ML and readable formats for UI.
+- **`src/error_classifier.py`**: Multi-class machine learning classifier (TF-IDF + SGD/Logistic Regression) categorizing diagnostics into 8 semantic error types.
+- **`src/error_explainer.py`**: Multi-tier diagnostic enrichment engine combining curated glossary templates, ML category explanations, and regex fallbacks.
+- **`src/auto_healer.py`**: Deterministic heuristic engine performing localized regex AST corrections (missing semicolons, brace balancing, keyword typos, header injection).
+- **`src/agentic_compiler.py`**: Autonomous ReAct healing agent coordinating multi-step repair attempts with live `g++` compilation feedback.
 - **`src/aai_guardrail.py`**: Autonomous AI Guardrail intercepting ingress prompt injections and egress backdoor trojans.
-- **`src/heal_loop.py`**: Energy-instrumented compilation repair loop (CodeCarbon / RAPL telemetry). PyQt6 decoupled for headless CLI and automated benchmark execution.
+- **`src/security_analyzer.py`**: Static AST-less security analyzer scanning for unsafe APIs (`gets`, `strcpy`, `system`) and memory tracking (`malloc`/`free` scope depth).
+- **`src/heal_loop.py`**: Energy-instrumented compilation repair loop with CodeCarbon/RAPL telemetry.
 
-### 3.2 MiniC Clean-Room Compiler Core (`src/core/`)
-- **`src/core/lexer.py`**: Formal tokenizing scanner converting MiniC source into typed token sequences.
-- **`src/core/parser.py`**: Recursive descent parser building typed Abstract Syntax Tree (AST) nodes with visual ASCII tree formatting.
-- **`src/core/semantic.py`**: Semantic type verification and hierarchical lexical scope management (`Scope`, `Symbol`, `SymbolTable`).
-- **`src/core/ir.py`**: Three-Address Code (TAC) Quadruple intermediate representation generator with control-flow lowering.
-- **`src/core/optimizer.py`**: 5 classical iterative optimization passes (Constant Folding, Common Subexpression Elimination, Dead Code Elimination, Copy Propagation, Algebraic Simplification).
-- **`src/core/interpreter.py`**: Virtual stack/register TAC interpreter acting as the dynamic execution oracle.
-
-### 3.3 AI Insights & Fault-Tolerant Platform (`src/ai/`)
-- **`src/ai/llm_client.py`**: Provider-agnostic Gemini client (`gemini-flash-lite-latest` default) with SHA-256 prompt caching, exponential backoff, and offline mock support (`LLM_MOCK=1`).
-- **`src/ai/schema_utils.py`**: Zero-Crash schema validation engine with a 1-retry self-correction feedback loop and deterministic fallback factory.
-- **`src/ai/phase_explainer.py`**: Multi-phase compiler explanation synthesizer.
-- **`src/ai/ai_optimizer.py`**: TAC IR optimizer implementing the "AI Proposes, Classic Compiler Verifies" gatekeeper.
-- **`src/ai/bug_detector.py`**: Logic bug detector retaining only findings that cite validated AST line numbers.
+### 3.2 AI & Infrastructure (`src/ai/`)
+- **`src/ai/llm_client.py`**: Provider-agnostic Gemini client (`gemini-flash-lite-latest` default) with SHA-256 prompt caching, exponential backoff retries, threat guardrail routing, and offline mock support (`LLM_MOCK=1`).
+- **`src/ai/__init__.py`**: Exports `LLMClient` for clean integration across agentic and web backends.
 
 ---
 
 ## 4. Empirical Evaluation & Benchmark Results
 
-The comparative evaluation was executed via `src/evaluation/benchmark.py` against live Google Gemini:
+The comparative evaluation was executed via `src/evaluation/benchmark.py` across 51 test fixtures:
 
 ### 4.1 Comparative Self-Healing Benchmark (51 Test Fixtures)
 
@@ -128,21 +98,12 @@ The comparative evaluation was executed via `src/evaluation/benchmark.py` agains
 | **Total Test Fixtures Evaluated** | 51 | 51 | — |
 | **Baseline Clean Files (No repair needed)** | 12 / 51 (23.5%) | 12 / 51 (23.5%) | — |
 | **Broken Files Requiring Repair** | 39 / 51 (76.5%) | 39 / 51 (76.5%) | — |
-| **Successful Program Repairs** | **9 / 39 (23.1%)** | **31 / 39 (79.5%)** | **+56.4%** |
-| **Average Repair Latency** | 1.219 s | 4.656 s | — |
+| **Successful Program Repairs** | **10 / 39 (25.6%)** | **31 / 39 (79.5%)** | **+53.8%** |
+| **Average Repair Latency** | **1.118 s** | **1.486 s** | — |
 | **Adversarial Ingress Interceptions** | N/A | **5 / 5 (100% Blocked by AAI Guardrail)** | Security Shield |
-| **Classifier Match Accuracy** | 47.1% (24 / 51) | 47.1% (24 / 51) | Heuristic Labels |
+| **Classifier Match Accuracy** | **47.1% (24 / 51)** | **47.1% (24 / 51)** | Heuristic Labels |
 
-### 4.2 Verifier Gatekeeper & Live AI Optimizer Evaluation
-
-| Evaluation Suite | Proposals Evaluated | Admitted (Sound) | Blocked (Unsound / Crash) | Gatekeeper Soundness |
-|:---|:---:|:---:|:---:|:---:|
-| **Interpreter Verifier Test Suite** *(Synthetic Soundness)* | 11 | 6 (54.5%) | 5 (45.5%) | **100.0% Sound** |
-| **Live Gemini TAC Optimizer** *(Live AI Proposals)* | 8 | 8 (100.0%) | 0 (0.0%) | **100.0% Sound** |
-
-> [!NOTE]
-> **Verification Model Boundary:**  
-> The equivalence check performs dynamic differential testing by executing candidate IR on a test execution trace and comparing observable output. This is dynamic execution testing, not formal mathematical proof. An unsound transformation whose divergence is unexercised on the specific input trace could pass.
+*All figures are recomputed directly from `results/final.csv` and documented in `results/benchmark_summary.md`.*
 
 ---
 
@@ -193,7 +154,7 @@ export LLM_MOCK=1        # Linux/macOS
 ## 6. How to Run
 
 ### 6.1 Interactive Desktop GUI
-Launch the 8-page workstation featuring the 5-tab MiniC Pipeline Inspector and asynchronous AI Insights panel:
+Launch the PyQt6 workstation with 6 dedicated sidebar modules (Editor, AST Explorer, Energy Dashboard, Call Graph, ML Inspector, Healing Dashboard):
 ```bash
 python src/gui.py
 ```
@@ -204,21 +165,8 @@ Run autonomous iterative healing on any broken C++ source file:
 python src/main.py test_cases/syntax_error.cpp
 ```
 
-### 6.3 MiniC Clean-Room Compiler (Python API)
-Inspect each classical compilation phase for a MiniC program. Run from the repository root:
-```bash
-# Tokenize
-python -c "import sys; sys.path.insert(0,'src'); from core.lexer import Lexer; print(Lexer('int main() { return 42; }').tokenize())"
-
-# Parse and pretty-print the AST
-python -c "import sys; sys.path.insert(0,'src'); from core.lexer import Lexer; from core.parser import Parser; from core.ast_nodes import pretty_print_ast; print(pretty_print_ast(Parser(Lexer('int main() { int x = 10; return x; }').tokenize()).parse()))"
-
-# Generate three-address code, optimize it, and run both versions
-python -c "import sys; sys.path.insert(0,'src'); from core.ir import generate_ir; from core.optimizer import optimize; from core.interpreter import run_ir; ir = generate_ir('int main() { int a = 2 + 3; print(a); return a; }'); opt, stats = optimize(ir); print(len(ir), '->', len(opt), 'instructions'); print(run_ir(ir), run_ir(opt))"
-```
-
-### 6.4 Comparative Benchmark Suite
-Run the full comparative evaluation across all 51 fixtures, synthetic verifier tests, and live Gemini TAC optimization:
+### 6.3 Comparative Benchmark Suite
+Run the full comparative evaluation across all 51 fixtures:
 ```bash
 # Run full live comparative benchmark:
 python src/evaluation/benchmark.py --output results/final.csv --markdown results/benchmark_summary.md
@@ -227,50 +175,53 @@ python src/evaluation/benchmark.py --output results/final.csv --markdown results
 python src/evaluation/benchmark.py --no-llm
 ```
 
-### 6.5 Automated Test Suite
-Execute the comprehensive 161-test pytest validation suite:
+### 6.4 Automated Test Suite
+Execute the comprehensive pytest validation suite (70 passing tests):
 ```bash
-pytest tests/ -v
+pytest tests/ -q
 ```
 
-### 6.6 Web Studio (browser interface)
-A browser interface that reuses the same Python modules and needs no extra packages:
+### 6.5 Web Studio (Browser Interface)
+A lightweight browser interface that reuses the existing Python modules with zero extra dependencies:
 ```bash
 python src/web/server.py              # opens http://127.0.0.1:8765
 python src/web/server.py --no-browser --port 9000
 ```
-Pages: C++ workspace (Compile, Compile & Run, open/save files, explanations, suggested fixes), Changes (every proposed fix with accept / reject / undo), MiniC pipeline, Syntax tree (an interactive node-and-edge diagram for MiniC and clang: pan, zoom, fold branches, search, click a node to see its source lines, export as SVG), AI insights, Benchmark and Architecture.
-
-- Fixes are only *proposed*. The browser shows a diff and nothing changes until you press Accept.
-- The server listens on `127.0.0.1` only. A C++ program runs **only when you press Compile & Run**, in a temporary folder with a 5 s timeout, a 64 KB output cap, CPU/memory/file-size limits (Linux/macOS) and no access to your API keys. This is a convenience limit, not a security sandbox: only run code you trust.
-- Open a `.cpp` file with **Open file** or drag it onto the editor (limit 200 KB); **Save** downloads the editor contents.
-- AI features need `GEMINI_API_KEY` in the environment (or a `.env` file). Without it, everything else still works. `LLM_MOCK=1` gives canned answers for an offline demo, and the UI shows a banner while it is on.
-- The Benchmark page recomputes every figure from `results/final.csv` when it loads.
+- **C++ Studio:** Includes full code editor, **Open / Save file**, **Compile** (invoking `g++`), **Run** (with stdout/stderr console), **Syntax tree tab** (interactive Clang AST explorer), **Diagnostics**, and **Review**.
+- **Changes Page:** Review history of proposed patches with one-click Accept, Reject, or Undo.
+- **Benchmark & Architecture:** Live empirical figures loaded directly from `results/final.csv` and interactive hand-drawn SVG architecture diagrams.
+- **Safety Controls:**
+  - Fixes are only *proposed*; the browser shows unified diffs and nothing is written to disk without explicit approval.
+  - **Run** compiles C++ and executes it locally with a 5-second timeout, 64 KB output cap, isolated temp directory, and OS limits. Code blocked by security checks is never executed.
+  - Server binds strictly to `127.0.0.1` by default; execution is automatically disabled if bound to external hosts.
 
 ---
 
-## 7. Project Structure & Documentation
+## 7. Project Structure
 
 ```
 toacd-pbl/
 ├── src/
-│   ├── core/                  # MiniC Compiler (Lexer, Parser, Semantic, IR, Optimizer, Interpreter)
-│   ├── ai/                    # AI Subsystem (LLMClient, Explainer, TAC Optimizer, Bug Detector)
+│   ├── ai/                    # AI Subsystem (LLMClient with cache & guardrail routing)
 │   ├── evaluation/            # Benchmark Harness (benchmark.py)
+│   ├── web/                   # Web Studio backend (server.py) and frontend (static/)
 │   ├── compiler_runner.py     # g++/clang++ toolchain runner & sanitizer
 │   ├── error_parser.py        # Diagnostic stderr parser & context builder
 │   ├── error_classifier.py    # TF-IDF + SGD ML error category classifier
+│   ├── error_explainer.py     # Multi-tier explanation engine (glossary + ML)
 │   ├── auto_healer.py         # Static rule-based heuristic healing engine
-│   ├── agentic_compiler.py    # Autonomous 3-tier self-healing compiler agent
+│   ├── agentic_compiler.py    # Autonomous multi-tier self-healing compiler agent
 │   ├── aai_guardrail.py       # Autonomous AI Ingress & Egress security guardrail
+│   ├── security_analyzer.py   # Static AST-less security scanner
+│   ├── ast_extractor.py       # Clang AST extraction wrapper
 │   ├── heal_loop.py           # Energy-telemetry healing iteration loop (CodeCarbon)
-│   └── gui.py                 # 8-page PyQt6 desktop workstation
-├── tests/                     # 9 automated pytest test suites (161 passing tests)
+│   └── gui.py                 # 6-page PyQt6 desktop workstation
+├── tests/                     # Automated pytest test suites (70 passing tests)
 ├── test_cases/                # 51 C++ test cases (syntax, semantic, security, attacks)
 ├── results/                   # Benchmark evaluation artifacts (final.csv, summary.md)
+├── scripts/                   # Faculty defense live verification script
 ├── DOCUMENTATION.md           # Comprehensive technical specification & architecture guide
 ├── ARCHITECTURE_GUIDE.md      # Detailed subsystem architecture & pedagogical breakdown
-├── project_explanation.md     # Viva voce & academic presentation walkthrough
 ├── PBL_Report.md              # Academic Project-Based Learning report
 └── requirements.txt           # Python dependencies
 ```
@@ -279,5 +230,4 @@ toacd-pbl/
 
 ## 8. Academic Integrity & Ethics
 
-This project was developed for academic Project-Based Learning in Compiler Design. All empirical figures reported in this documentation reflect verified runs against real GCC diagnostics, software TAC interpreter executions, and live Google Gemini API endpoints. The guardrail architecture explicitly treats LLMs as untrusted proposition generators requiring dynamic execution verification before code admission.
-
+This project was developed for academic Project-Based Learning in Compiler Design. All empirical figures reported in this documentation reflect verified runs against real GCC diagnostics and live Google Gemini API endpoints. The guardrail architecture explicitly treats LLMs as untrusted proposition generators requiring strict security inspection and compiler verification before code admission.

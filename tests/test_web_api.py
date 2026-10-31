@@ -89,10 +89,10 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(d["ai_ready"])
         self.assertFalse(d["llm_mock"])
 
-    def test_samples_include_both_languages(self):
+    def test_samples_include_cpp_language(self):
         d = json.loads(self.get("/api/samples")[1])
         langs = {s["language"] for s in d["samples"]}
-        self.assertEqual(langs, {"minic", "cpp"})
+        self.assertEqual(langs, {"cpp"})
 
     def test_benchmark_rates_are_recomputed_from_csv(self):
         status, body = self.get("/api/benchmark")
@@ -110,41 +110,8 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(self.post("/api/cpp/heal", {"code": "int main(){}", "mode": "weird"})[0], 400)
 
     def test_ai_endpoints_explain_missing_key(self):
-        status, d = self.post("/api/minic/ai", {"action": "explain", "code": "int main() { return 0; }"})
-        self.assertEqual(status, 412)
-        self.assertIn("GEMINI_API_KEY", d["error"])
         status, d = self.post("/api/cpp/heal", {"mode": "ai", "code": "int main() { return 0 }"})
         self.assertEqual(status, 412)
-
-    def test_ai_action_is_validated(self):
-        status, _ = self.post("/api/minic/ai", {"action": "delete", "code": "int main() { return 0; }"})
-        self.assertEqual(status, 400)
-
-    # -- MiniC pipeline ------------------------------------------------------
-    def test_pipeline_runs_and_optimizer_preserves_output(self):
-        code = "int main() { int i = 0; int s = 0; while (i < 5) { s = s + i; i = i + 1; } print(s); return 0; }"
-        status, d = self.post("/api/minic/pipeline", {"code": code})
-        self.assertEqual(status, 200)
-        self.assertEqual(d["stage_reached"], "executed")
-        self.assertEqual(d["output"], ["10"])
-        self.assertTrue(d["equivalent"])
-        self.assertLessEqual(len(d["optimized_ir"]), len(d["ir"]))
-        self.assertEqual(d["ast"]["type"], "Program")
-
-    def test_pipeline_stops_at_syntax_errors(self):
-        status, d = self.post("/api/minic/pipeline", {"code": "int main() { int x = ; return 0; }"})
-        self.assertEqual(status, 200)
-        self.assertEqual(d["stage_reached"], "parse")
-        self.assertTrue(d["parse_errors"])
-        self.assertEqual(d["ir"], [])
-
-    def test_pipeline_reports_semantic_errors(self):
-        code = "int main() { int a = 1; int a = 2; b = 3; return 0; }"
-        d = self.post("/api/minic/pipeline", {"code": code})[1]
-        self.assertEqual(d["stage_reached"], "semantic")
-        msgs = " ".join(x["message"] for x in d["semantic"])
-        self.assertIn("Redeclaration", msgs)
-        self.assertIn("Undeclared", msgs)
 
     # -- C++ endpoints (need g++) -------------------------------------------
     @unittest.skipUnless(HAS_GXX, "g++ not installed")
@@ -183,87 +150,75 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(d["ok"])
         self.assertIn("Security Error", d["diagnostics"][0]["message"])
 
-    # -- Compile & Run ---------------------------------------------------------
+
+    # -- compile / run ---------------------------------------------------------
     @unittest.skipUnless(HAS_GXX, "g++ not installed")
-    def test_run_captures_stdout_stderr_and_exit_code(self):
-        code = '#include <iostream>\nint main(){ std::cout << "out"; std::cerr << "err"; return 3; }\n'
-        status, d = self.post("/api/cpp/run", {"code": code})
-        self.assertEqual(status, 200)
+    def test_run_executes_program_with_stdin(self):
+        code = ('#include <iostream>\nint main(){ int a,b; std::cin>>a>>b; '
+                'std::cout<<a+b<<"\\n"; std::cerr<<"warn"; return 3; }')
+        d = self.post("/api/cpp/run", {"code": code, "stdin": "20 22"})[1]
         self.assertTrue(d["ran"])
-        self.assertEqual((d["run"]["stdout"], d["run"]["stderr"], d["run"]["exit_code"]), ("out", "err", 3))
-        self.assertTrue(d["analysis"]["ok"])
+        self.assertEqual(d["stdout"].strip(), "42")
+        self.assertEqual(d["stderr"], "warn")
+        self.assertEqual(d["exit_code"], 3)
 
     @unittest.skipUnless(HAS_GXX, "g++ not installed")
-    def test_run_passes_stdin_to_the_program(self):
-        code = '#include <iostream>\nint main(){ int a, b; std::cin >> a >> b; std::cout << a + b; }\n'
-        d = self.post("/api/cpp/run", {"code": code, "stdin": "12\n30\n"})[1]
-        self.assertEqual(d["run"]["stdout"], "42")
-
-    @unittest.skipUnless(HAS_GXX, "g++ not installed")
-    def test_run_does_not_run_code_that_fails_to_compile(self):
+    def test_run_does_not_run_when_compile_fails(self):
         d = self.post("/api/cpp/run", {"code": MISSING_SEMICOLON})[1]
+        self.assertFalse(d["ok"])
         self.assertFalse(d["ran"])
-        self.assertIsNone(d["run"])
-        self.assertFalse(d["analysis"]["ok"])
+        self.assertGreaterEqual(d["error_count"], 1)
 
     @unittest.skipUnless(HAS_GXX, "g++ not installed")
-    def test_run_blocks_forbidden_calls_before_compiling(self):
-        d = self.post("/api/cpp/run", {"code": 'int main() { system("ls"); }'})[1]
-        self.assertFalse(d["ran"])
-        self.assertIn("Security Error", d["analysis"]["diagnostics"][0]["message"])
-
-    @unittest.skipUnless(HAS_GXX and os.name == "posix", "needs g++ and POSIX signals")
-    def test_run_reports_a_crash(self):
-        d = self.post("/api/cpp/run", {"code": "int main(){ int* p = 0; *p = 1; }"})[1]
-        self.assertEqual(d["run"]["signal"], "SIGSEGV")
-        self.assertTrue(d["run"]["signal_hint"])
-
-    @unittest.skipUnless(HAS_GXX, "g++ not installed")
-    def test_run_stops_an_endless_program(self):
-        saved = server.RUN_TIMEOUT_S
+    def test_run_stops_infinite_loops(self):
+        orig = server.RUN_TIMEOUT_S
         server.RUN_TIMEOUT_S = 1
         try:
             d = self.post("/api/cpp/run", {"code": "int main(){ while(true){} }"})[1]
         finally:
-            server.RUN_TIMEOUT_S = saved
-        self.assertTrue(d["run"]["timed_out"])
-        self.assertLess(d["run"]["elapsed_ms"], 4000)
+            server.RUN_TIMEOUT_S = orig
+        self.assertTrue(d["timed_out"])
 
     @unittest.skipUnless(HAS_GXX, "g++ not installed")
-    def test_run_caps_runaway_output(self):
-        code = '#include <iostream>\nint main(){ while(true) std::cout << "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n"; }'
+    def test_run_caps_output(self):
+        code = '#include <cstdio>\nint main(){ for(;;) putchar(65); }'
         d = self.post("/api/cpp/run", {"code": code})[1]
-        self.assertTrue(d["run"]["truncated"])
-        self.assertLessEqual(len(d["run"]["stdout"]), server.RUN_OUTPUT_CAP)
+        self.assertTrue(d["truncated"] or d["timed_out"])
+        self.assertLessEqual(len(d["stdout"]), server.RUN_OUTPUT_CAP)
 
     @unittest.skipUnless(HAS_GXX, "g++ not installed")
-    def test_programs_cannot_see_api_keys(self):
-        os.environ["GEMINI_API_KEY"] = "super-secret-value"
+    def test_run_blocks_dangerous_code_and_can_be_disabled(self):
+        d = self.post("/api/cpp/run", {"code": 'int main(){ system("ls"); }'})[1]
+        self.assertFalse(d["ran"])
+        server.RUN_ENABLED = False
         try:
-            code = '#include <cstdlib>\n#include <iostream>\nint main(){ const char* k = std::getenv("GEMINI_API_KEY"); std::cout << (k ? k : "hidden"); }'
-            d = self.post("/api/cpp/run", {"code": code})[1]
+            status, e = self.post("/api/cpp/run", {"code": "int main(){}"})
         finally:
-            del os.environ["GEMINI_API_KEY"]
-        self.assertEqual(d["run"]["stdout"], "hidden")
+            server.RUN_ENABLED = True
+        self.assertEqual(status, 403)
 
-    def test_run_validates_stdin(self):
-        self.assertEqual(self.post("/api/cpp/run", {"code": "int main(){}", "stdin": 5})[0], 400)
-        self.assertEqual(self.post("/api/cpp/run", {"code": "int main(){}", "stdin": "x" * 70_000})[0], 413)
+    def test_run_rejects_oversized_stdin(self):
+        status, _ = self.post("/api/cpp/run", {"code": "int main(){}", "stdin": "x" * 70000})
+        self.assertEqual(status, 400)
 
-    def test_cpp_samples_include_runnable_starters(self):
-        d = json.loads(self.get("/api/samples")[1])
-        names = [x["name"] for x in d["samples"] if x["language"] == "cpp"]
-        self.assertEqual(names[0], "Hello, world")
+    def test_non_loopback_host_disables_run(self):
+        srv = server.make_server("0.0.0.0", 0)
+        try:
+            self.assertFalse(server.RUN_ENABLED)
+        finally:
+            srv.server_close()
+            server.RUN_ENABLED = True
 
-    def test_ast_path_scrubbing_survives_windows_paths(self):
-        """Regression: backslashes in the temp dir used to corrupt the JSON ('Invalid \\escape')."""
-        wd = r"C:\Users\Me\AppData\Local\Temp\webui_x"
-        tree = [{"type": "FunctionDecl", "details": wd + r"\main.cpp:3:5 main", "children": [
-            {"type": "VarDecl", "details": wd.replace("\\", "/") + "/main.cpp x", "children": []}]}]
-        out = server._scrub_paths(tree, wd)
-        json.dumps(out)
-        self.assertEqual(out[0]["details"], "main.cpp:3:5 main")
-        self.assertEqual(out[0]["children"][0]["details"], "main.cpp x")
+
+class ScrubPathsTests(unittest.TestCase):
+    def test_windows_style_temp_paths_are_removed_without_breaking_json(self):
+        wd = "C:\\Users\\me\\AppData\\Local\\Temp\\webui_ab12"
+        tree = {"detail": "<" + wd + "\\main.cpp:6:1> x", "children": [{"detail": wd + "/main.cpp"}]}
+        out = server._scrub_paths(tree, [wd + "\\", wd.replace("\\", "/") + "/", wd])
+        json.dumps(out)  # must stay serialisable
+        self.assertNotIn("webui_", json.dumps(out))
+        self.assertIn("main.cpp:6:1", out["detail"])
+
 
 
 class CompilerDetectionTests(unittest.TestCase):

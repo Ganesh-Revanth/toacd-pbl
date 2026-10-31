@@ -19,9 +19,7 @@ from evaluation.benchmark import (
     discover_test_cases,
     run_benchmark,
     print_summary_table,
-    run_ai_optimizer_benchmark,
     format_markdown_table,
-    MINIC_OPTIMIZER_BENCHMARKS,
 )
 
 
@@ -173,24 +171,6 @@ class TestBenchmarkModule(unittest.TestCase):
         print_summary_table(mock_results, no_llm=True)
         print_summary_table(mock_results, no_llm=False)
 
-    def test_run_ai_optimizer_benchmark(self):
-        results = run_ai_optimizer_benchmark(no_llm=True)
-        self.assertEqual(len(results), len(MINIC_OPTIMIZER_BENCHMARKS))
-
-        total_accepted = sum(r["suggestions_accepted"] for r in results)
-        total_rejected = sum(r["suggestions_rejected"] for r in results)
-
-        # Confirm both accepted (sound) and rejected (unsound/crash) suggestions occurred
-        self.assertGreater(total_accepted, 0)
-        self.assertGreater(total_rejected, 0)
-
-        # Every program must maintain equivalence verified by the interpreter
-        for r in results:
-            self.assertEqual(r["suite"], "ai_optimizer")
-            self.assertEqual(r["equivalence_verified"], "yes")
-            self.assertIn("initial_instructions", r)
-            self.assertIn("final_instructions", r)
-
     def test_format_markdown_table(self):
         healing_mock = [
             {
@@ -206,31 +186,14 @@ class TestBenchmarkModule(unittest.TestCase):
                 "llm_time_sec": 1.25,
             }
         ]
-        opt_mock = [
-            {
-                "suite": "ai_optimizer",
-                "file": "opt_01_constant_folding",
-                "expected_category": "constant_folding",
-                "initial_instructions": 12,
-                "final_instructions": 10,
-                "instruction_delta": -2,
-                "suggestions_proposed": 2,
-                "suggestions_accepted": 1,
-                "suggestions_rejected": 1,
-                "rejection_reasons": "[bad_fold]: Output mismatch",
-                "equivalence_verified": "yes",
-            }
-        ]
 
-        md = format_markdown_table(healing_mock, opt_mock)
-        self.assertIn("# Self-Healing Compiler & AI Optimizer Benchmark Results", md)
+        md = format_markdown_table(healing_mock)
+        self.assertIn("# Self-Healing Compiler Benchmark Results", md)
         self.assertIn("## 1. Self-Healing Comparative Evaluation", md)
-        self.assertIn("## 2. AI Optimizer Evaluation", md)
-        self.assertIn("## 3. Aggregate Performance & Verification Summary", md)
+        self.assertIn("## 2. Aggregate Performance & Verification Summary", md)
         self.assertIn("`tc01.cpp`", md)
-        self.assertIn("`opt_01_constant_folding`", md)
 
-    def test_run_benchmark_with_optimizer_creates_final_csv(self):
+    def test_run_benchmark_with_markdown_creates_final_csv(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             test_dir = os.path.join(tmp_dir, "test_cases")
             os.makedirs(test_dir, exist_ok=True)
@@ -253,19 +216,18 @@ class TestBenchmarkModule(unittest.TestCase):
                     output_csv=out_csv,
                     no_llm=True,
                     max_attempts=3,
-                    include_optimizer=True,
                     markdown_path=out_md,
                 )
 
-                # Total items: 1 healing case + 6 optimizer cases
-                self.assertEqual(len(res), 1 + len(MINIC_OPTIMIZER_BENCHMARKS))
+                self.assertEqual(len(res), 1)
                 self.assertTrue(os.path.exists(out_csv))
                 self.assertTrue(os.path.exists(out_md))
 
                 with open(out_csv, "r", encoding="utf-8") as f:
                     rows = list(csv.DictReader(f))
-                    self.assertEqual(len(rows), 1 + len(MINIC_OPTIMIZER_BENCHMARKS))
-                    healing_rows = [r for r in rows if r["suite"] == "healing"]
-                    opt_rows = [r for r in rows if r["suite"] == "ai_optimizer"]
-                    self.assertEqual(len(healing_rows), 1)
-                    self.assertEqual(len(opt_rows), len(MINIC_OPTIMIZER_BENCHMARKS))
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0]["suite"], "healing")
+
+
+if __name__ == "__main__":
+    unittest.main()

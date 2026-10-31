@@ -5,7 +5,7 @@ Local web UI for the Green Self-Healing Compiler.
 
 Runs on Python's standard library only (no Flask/FastAPI needed) and reuses the
 existing modules: error_explainer, auto_healer, diff_viewer, ast_extractor,
-security_analyzer, agentic_compiler, and the MiniC core + AI packages.
+security_analyzer, and agentic_compiler.
 
 Usage:
     python src/web/server.py                # http://127.0.0.1:8765
@@ -14,12 +14,11 @@ Usage:
 Safety notes:
   * Binds to 127.0.0.1 only (never exposed to the network by default).
   * Request bodies are capped; compiler runs have timeouts and use temp dirs.
-  * C++ programs only run when the user presses "Compile & Run" (/api/cpp/run).
-    They run in a throw-away temp directory with a wall-clock timeout, an output
-    cap, CPU / memory / file-size limits (POSIX) and a stripped environment, so
-    API keys are not visible to them. This is a convenience limit for your own
-    code on your own machine, NOT a security sandbox: do not run untrusted code.
-    MiniC programs run inside the Python TAC interpreter, which has a step limit.
+  * "Run" compiles the C++ and executes it on THIS machine, like any IDE. It is only
+    enabled while the server is bound to localhost, never for code the existing
+    security check blocks, and the program gets a temp working directory, a 5 s
+    timeout, a 64 KB output cap and (on Linux/macOS) CPU/memory/file-size limits.
+    It is not a sandbox: only run code you trust.
   * Healing endpoints only PROPOSE a patch. The browser shows the diff and the
     user accepts or rejects it; nothing is written to disk by the server.
 """
@@ -56,10 +55,13 @@ if str(SRC_DIR) not in sys.path:
 MAX_BODY_BYTES = 1_000_000
 COMPILE_TIMEOUT_S = 30
 HEAL_ATTEMPTS = 3
-RUN_TIMEOUT_S = 5
-RUN_OUTPUT_CAP = 64 * 1024          # bytes kept per stream (stdout / stderr)
+RUN_TIMEOUT_S = 5            # a program that runs longer than this is stopped
+RUN_OUTPUT_CAP = 64 * 1024   # bytes of stdout/stderr kept; more than this stops the program
 RUN_STDIN_CAP = 64 * 1024
-BIN_NAME = "out.exe" if sys.platform == "win32" else "out.bin"
+OUT_NAME = "out.exe" if os.name == "nt" else "out.bin"
+# Running compiled programs is only allowed while the server listens on this machine only.
+# make_server() switches this off for any non-loopback host.
+RUN_ENABLED = True
 
 _ERR_PATTERN = re.compile(r"^(.+?):(\d+):(\d+):\s*(error|warning):\s*(.*)$")
 
@@ -199,7 +201,7 @@ def compile_cpp(code: str, workdir: str) -> Tuple[List[Dict[str, Any]], str, str
     env = {**env, "LC_ALL": "C", "LANGUAGE": "C"}
     try:
         res = subprocess.run(
-            [gxx, "-std=c++17", "-Wall", src, "-o", os.path.join(workdir, BIN_NAME)],
+            [gxx, "-std=c++17", "-Wall", src, "-o", os.path.join(workdir, OUT_NAME)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
             cwd=workdir, timeout=COMPILE_TIMEOUT_S,
         )
@@ -227,6 +229,116 @@ def compile_cpp(code: str, workdir: str) -> Tuple[List[Dict[str, Any]], str, str
             "message": first, "raw": first, "category": "other", "confidence": 0.5,
         })
     return errors, res.stderr, src
+
+
+def _limit_child() -> None:  # pragma: no cover - runs in the child, POSIX only
+    import resource
+    resource.setrlimit(resource.RLIMIT_CPU, (RUN_TIMEOUT_S + 2, RUN_TIMEOUT_S + 2))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (RUN_OUTPUT_CAP * 4, RUN_OUTPUT_CAP * 4))
+    resource.setrlimit(resource.RLIMIT_NPROC, (64, 64)) if hasattr(resource, "RLIMIT_NPROC") else None
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
+    except (ValueError, OSError):
+        pass
+
+
+def _run_binary(exe: str, workdir: str, stdin_text: str, env: Dict[str, str]) -> Dict[str, Any]:
+    """Run a compiled program with a timeout, an output cap and (on POSIX) resource limits."""
+    t0 = time.time()
+    kw: Dict[str, Any] = {}
+    if os.name != "nt":
+        kw["preexec_fn"] = _limit_child
+    proc = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            cwd=workdir, env=env, **kw)
+    chunks = {"out": bytearray(), "err": bytearray()}
+    truncated = threading.Event()
+
+    def pump(stream, key):
+        try:
+            while True:
+                b = stream.read(4096)
+                if not b:
+                    return
+                room = RUN_OUTPUT_CAP - len(chunks[key])
+                if room > 0:
+                    chunks[key] += b[:room]
+                if len(b) > room:
+                    truncated.set()
+                    proc.kill()
+                    return
+        except Exception:
+            return
+
+    readers = [threading.Thread(target=pump, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=pump, args=(proc.stderr, "err"), daemon=True)]
+    for r in readers:
+        r.start()
+
+    def feed():
+        try:
+            proc.stdin.write(stdin_text.encode("utf-8"))
+        except Exception:
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+    threading.Thread(target=feed, daemon=True).start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=RUN_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait()
+    for r in readers:
+        r.join(timeout=1)
+    code = proc.returncode
+    return {
+        "stdout": chunks["out"].decode("utf-8", "replace"),
+        "stderr": chunks["err"].decode("utf-8", "replace"),
+        "exit_code": code,
+        "timed_out": timed_out,
+        "truncated": truncated.is_set(),
+        "crashed": (not timed_out) and not truncated.is_set() and code is not None and (code < 0 or code >= 0xC0000000),
+        "run_s": round(time.time() - t0, 3),
+    }
+
+
+def api_cpp_compile(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Compile only (no explanations): the quick 'does it build?' action."""
+    return api_cpp_analyze(body)
+
+
+def api_cpp_run(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Compile and run. Never runs anything if the compile fails or the code is blocked."""
+    if not RUN_ENABLED:
+        raise ApiError("Running programs is disabled because the server is not bound to this machine only.", 403)
+    code = _need_code(body)
+    stdin_text = body.get("stdin", "")
+    if not isinstance(stdin_text, str) or len(stdin_text) > RUN_STDIN_CAP:
+        raise ApiError("stdin must be text of at most 64 KB.")
+    from compiler_runner import get_compiler_cmd_and_env
+    t0 = time.time()
+    with tempfile.TemporaryDirectory(prefix="webui_") as wd:
+        errors, stderr, src = compile_cpp(code, wd)
+        _classify(errors)
+        enriched = _enrich(errors, src)
+        hard = sum(1 for e in enriched if e["type"] == "error")
+        result: Dict[str, Any] = {
+            "ok": hard == 0, "error_count": hard,
+            "warning_count": sum(1 for e in enriched if e["type"] == "warning"),
+            "diagnostics": enriched, "raw_stderr": stderr.strip(), "ran": False,
+        }
+        exe = os.path.join(wd, OUT_NAME)
+        if hard == 0 and os.path.isfile(exe):
+            _, env = get_compiler_cmd_and_env()   # same PATH as the compiler, so MinGW runtime DLLs resolve
+            result.update(_run_binary(exe, wd, stdin_text, env))
+            result["ran"] = True
+    result["elapsed_s"] = round(time.time() - t0, 3)
+    return result
 
 
 def _enrich(errors: List[Dict[str, Any]], src_path: str) -> List[Dict[str, Any]]:
@@ -264,13 +376,14 @@ def _security_findings(src_path: str) -> List[Dict[str, Any]]:
         return []
 
 
-def _analyze_in(code: str, wd: str) -> Dict[str, Any]:
-    """Compile `code` inside the existing directory `wd` and describe the result."""
+def api_cpp_analyze(body: Dict[str, Any]) -> Dict[str, Any]:
+    code = _need_code(body)
     t0 = time.time()
-    errors, stderr, src = compile_cpp(code, wd)
-    _classify(errors)
-    enriched = _enrich(errors, src)
-    security = _security_findings(src)
+    with tempfile.TemporaryDirectory(prefix="webui_") as wd:
+        errors, stderr, src = compile_cpp(code, wd)
+        _classify(errors)
+        enriched = _enrich(errors, src)
+        security = _security_findings(src)
     hard = sum(1 for e in enriched if e["type"] == "error")
     warn = sum(1 for e in enriched if e["type"] == "warning")
     return {
@@ -282,132 +395,6 @@ def _analyze_in(code: str, wd: str) -> Dict[str, Any]:
         "raw_stderr": stderr.strip(),
         "elapsed_s": round(time.time() - t0, 3),
     }
-
-
-def api_cpp_analyze(body: Dict[str, Any]) -> Dict[str, Any]:
-    code = _need_code(body)
-    with tempfile.TemporaryDirectory(prefix="webui_") as wd:
-        return _analyze_in(code, wd)
-
-
-def _run_env(workdir: str) -> Dict[str, str]:
-    """A minimal environment: enough to run a program, nothing secret (no API keys)."""
-    env = {"PATH": os.environ.get("PATH", ""), "HOME": workdir, "TMPDIR": workdir, "TEMP": workdir, "TMP": workdir}
-    for k in ("SYSTEMROOT", "SystemRoot", "LANG", "LC_ALL"):
-        if os.environ.get(k):
-            env[k] = os.environ[k]
-    return env
-
-
-def _signal_name(returncode: int) -> Optional[str]:
-    if returncode >= 0 or sys.platform == "win32":
-        return None
-    import signal
-    try:
-        return signal.Signals(-returncode).name
-    except ValueError:
-        return f"signal {-returncode}"
-
-
-_SIGNAL_HINTS = {
-    "SIGSEGV": "Segmentation fault: the program touched memory it does not own (null pointer, bad index, deep recursion).",
-    "SIGABRT": "Aborted: an assertion failed, an exception was not caught, or memory was freed twice.",
-    "SIGFPE": "Arithmetic error, usually an integer division by zero.",
-    "SIGKILL": "The program was killed (it probably used too much memory).",
-    "SIGXCPU": "The program used too much CPU time.",
-    "SIGXFSZ": "The program tried to write a file that was too large.",
-}
-
-
-def run_binary(binary: str, workdir: str, stdin_text: str) -> Dict[str, Any]:
-    """Run a compiled program with a timeout and output cap. Never raises for program failures."""
-    out_path, err_path, in_path = (os.path.join(workdir, n) for n in ("stdout.txt", "stderr.txt", "stdin.txt"))
-    with open(in_path, "w", encoding="utf-8", newline="") as f:
-        f.write(stdin_text)
-
-    if sys.platform == "win32":
-        cmd, extra = [binary], {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
-    else:
-        # ulimit failures are ignored on purpose (e.g. -v is unsupported on some systems).
-        script = ('ulimit -c 0 2>/dev/null; ulimit -t 10 2>/dev/null; ulimit -f 20480 2>/dev/null; '
-                  'ulimit -v 2097152 2>/dev/null; exec "$0"')
-        cmd, extra = ["/bin/sh", "-c", script, binary], {"start_new_session": True}
-
-    timed_out = False
-    flooded = False
-    t0 = time.time()
-    with open(in_path, "rb") as fin, open(out_path, "wb") as fout, open(err_path, "wb") as ferr:
-        try:
-            proc = subprocess.Popen(cmd, stdin=fin, stdout=fout, stderr=ferr, cwd=workdir,
-                                    env=_run_env(workdir), **extra)
-        except OSError as exc:
-            return {"started": False, "error": f"Could not start the program: {exc}"}
-
-        def kill() -> None:
-            try:
-                if sys.platform == "win32":
-                    proc.kill()
-                else:
-                    import signal
-                    os.killpg(proc.pid, signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-
-        while proc.poll() is None:
-            if time.time() - t0 > RUN_TIMEOUT_S:
-                timed_out = True
-                kill()
-                break
-            # Stop a program that floods its output long before the timeout.
-            if os.path.getsize(out_path) + os.path.getsize(err_path) > 8 * RUN_OUTPUT_CAP:
-                flooded = True
-                kill()
-                break
-            time.sleep(0.01)
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            kill()
-    elapsed_ms = int((time.time() - t0) * 1000)
-
-    def read_capped(path: str) -> Tuple[str, bool]:
-        size = os.path.getsize(path)
-        with open(path, "rb") as f:
-            data = f.read(RUN_OUTPUT_CAP)
-        return data.decode("utf-8", errors="replace"), size > RUN_OUTPUT_CAP
-
-    stdout, out_cut = read_capped(out_path)
-    stderr, err_cut = read_capped(err_path)
-    rc = proc.returncode
-    sig = _signal_name(rc) if rc is not None else None
-    killed_by_us = timed_out or flooded
-    return {
-        "started": True,
-        "stdout": stdout, "stderr": stderr,
-        "truncated": out_cut or err_cut,
-        "exit_code": rc, "signal": None if killed_by_us else sig,
-        "signal_hint": None if killed_by_us else _SIGNAL_HINTS.get(sig or ""),
-        "timed_out": timed_out, "output_flood": flooded, "timeout_s": RUN_TIMEOUT_S,
-        "elapsed_ms": elapsed_ms,
-        "used_stdin": bool(stdin_text),
-    }
-
-
-def api_cpp_run(body: Dict[str, Any]) -> Dict[str, Any]:
-    """Compile and, when there are no errors, run the program. Compile problems come back as in /analyze."""
-    code = _need_code(body)
-    stdin_text = body.get("stdin", "")
-    if not isinstance(stdin_text, str):
-        raise ApiError("'stdin' must be a string.")
-    if len(stdin_text.encode("utf-8")) > RUN_STDIN_CAP:
-        raise ApiError("Program input is too large (limit 64 KB).", status=413)
-    with tempfile.TemporaryDirectory(prefix="webui_run_") as wd:
-        analysis = _analyze_in(code, wd)
-        binary = os.path.join(wd, BIN_NAME)
-        if not analysis["ok"] or not os.path.isfile(binary):
-            return {"analysis": analysis, "ran": False, "run": None}
-        run = run_binary(binary, wd, stdin_text)
-    return {"analysis": analysis, "ran": bool(run.get("started")), "run": run}
 
 
 def _pick_fix_target(issues, skipped):
@@ -526,31 +513,21 @@ def api_cpp_ast(body: Dict[str, Any]) -> Dict[str, Any]:
         text = extract_ast(src)
         tree = parse_ast_to_tree(text, src)
         # hide the temp directory in node details
-        scrubbed = _scrub_paths(_to_jsonable(tree), wd)
+        scrubbed = _scrub_paths(_to_jsonable(tree), [wd + os.sep, wd.replace("\\", "/") + "/", wd])
     return {"tree": scrubbed, "node_count": _count_nodes(tree)}
 
 
-def _scrub_paths(obj: Any, directory: str) -> Any:
-    """Remove `directory` (and the separator after it) from every string in a JSON-like structure.
-
-    Works on the data, not on JSON text, so Windows backslashes cannot corrupt the output.
-    Matches both separator styles because clang may print either.
-    """
-    variants = {directory, directory.replace("\\", "/"), directory.replace("/", "\\")}
-    prefixes = sorted({v + sep for v in variants for sep in ("\\", "/")}, key=len, reverse=True)
-
-    def clean(value: Any) -> Any:
-        if isinstance(value, str):
-            for pre in prefixes:
-                value = value.replace(pre, "")
-            return value
-        if isinstance(value, list):
-            return [clean(v) for v in value]
-        if isinstance(value, dict):
-            return {k: clean(v) for k, v in value.items()}
-        return value
-
-    return clean(obj)
+def _scrub_paths(obj: Any, prefixes: List[str]) -> Any:
+    """Remove the temp directory from every string in a JSON-like structure (works for Windows paths too)."""
+    if isinstance(obj, str):
+        for pre in prefixes:
+            obj = obj.replace(pre, "")
+        return obj
+    if isinstance(obj, list):
+        return [_scrub_paths(x, prefixes) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _scrub_paths(v, prefixes) for k, v in obj.items()}
+    return obj
 
 
 def _count_nodes(tree: Any) -> int:
@@ -578,228 +555,8 @@ def gxx_available() -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MiniC pipeline
-# ──────────────────────────────────────────────────────────────────────────────
-
-def ast_to_json(node: Any) -> Any:
-    """Generic AST -> {type, line, column, attrs, children:[{role, node}]} converter."""
-    from core.ast_nodes import ASTNode
-    if not isinstance(node, ASTNode):
-        return None
-    attrs: Dict[str, Any] = {}
-    children: List[Dict[str, Any]] = []
-    for f in dataclasses.fields(node):
-        if f.name in ("line", "column"):
-            continue
-        val = getattr(node, f.name)
-        if isinstance(val, ASTNode):
-            children.append({"role": f.name, "node": ast_to_json(val)})
-        elif isinstance(val, list) and val and all(isinstance(v, ASTNode) for v in val):
-            for i, v in enumerate(val):
-                children.append({"role": f"{f.name}[{i}]", "node": ast_to_json(v)})
-        elif val is None:
-            continue
-        else:
-            attrs[f.name] = val if isinstance(val, (str, int, float, bool)) else str(val)
-    return {"type": type(node).__name__, "line": node.line, "column": node.column,
-            "attrs": attrs, "children": children}
-
-
-def _collect_locals(program: Any) -> List[Dict[str, Any]]:
-    """Walk the AST and list every function, parameter and variable with its scope."""
-    from core.ast_nodes import ASTNode, FunctionDef, VarDecl
-    out: List[Dict[str, Any]] = []
-
-    def walk(n: Any, scope: str) -> None:
-        if isinstance(n, FunctionDef):
-            out.append({"name": n.name, "kind": "function", "type": n.return_type,
-                        "scope": "global", "line": n.line,
-                        "detail": "(" + ", ".join(f"{t} {p}" for t, p in n.params) + ")"})
-            for t, p in n.params:
-                out.append({"name": p, "kind": "param", "type": t, "scope": n.name,
-                            "line": n.line, "detail": ""})
-            walk(n.body, n.name)
-            return
-        if isinstance(n, VarDecl):
-            out.append({"name": n.name, "kind": "variable", "type": n.var_type,
-                        "scope": scope, "line": n.line, "detail": ""})
-        if isinstance(n, ASTNode):
-            for f in dataclasses.fields(n):
-                v = getattr(n, f.name)
-                if isinstance(v, ASTNode):
-                    walk(v, scope)
-                elif isinstance(v, list):
-                    for item in v:
-                        if isinstance(item, ASTNode):
-                            walk(item, scope)
-
-    walk(program, "global")
-    return out
-
-
-def _inst_list(instructions: List[Any]) -> List[Dict[str, Any]]:
-    return [{"i": i, "text": str(inst)} for i, inst in enumerate(instructions)]
-
-
-def api_minic_pipeline(body: Dict[str, Any]) -> Dict[str, Any]:
-    code = _need_code(body)
-    from core.lexer import Lexer
-    from core.parser import Parser
-    from core.semantic import SemanticAnalyzer
-    from core.ir import generate_ir
-    from core.optimizer import optimize
-    from core.interpreter import run_ir
-
-    lexer = Lexer(code)
-    tokens = lexer.tokenize()
-    lex_errors = [{"message": e.message, "line": e.line, "column": e.column} for e in lexer.errors]
-
-    parser = Parser(tokens)
-    program = parser.parse()
-    parse_errors = [{"message": e.message, "line": e.line, "column": e.column,
-                     "expected": getattr(e, "expected", None)} for e in parser.errors]
-
-    result: Dict[str, Any] = {
-        "tokens": [{"type": getattr(t.type, "name", str(t.type)), "lexeme": t.lexeme,
-                    "line": t.line, "column": t.column} for t in tokens],
-        "lex_errors": lex_errors,
-        "parse_errors": parse_errors,
-        "ast": ast_to_json(program),
-        "semantic": [],
-        "symbols": [],
-        "ir": [], "optimized_ir": [], "opt_stats": {},
-        "output": None, "optimized_output": None, "equivalent": None, "runtime_error": None,
-        "stage_reached": "parse",
-    }
-    if lex_errors or parse_errors:
-        return result
-
-    analyzer = SemanticAnalyzer()
-    diags = analyzer.analyze(program)
-    result["semantic"] = [{"message": d.message, "line": d.line, "column": d.column,
-                           "severity": d.severity} for d in diags]
-    result["symbols"] = _collect_locals(program)
-    result["stage_reached"] = "semantic"
-    if any(d.severity == "error" for d in diags):
-        return result
-
-    try:
-        ir = generate_ir(program)
-        opt, stats = optimize(ir)
-    except Exception as exc:
-        result["runtime_error"] = f"IR generation failed: {type(exc).__name__}: {exc}"
-        return result
-    result["ir"] = _inst_list(ir)
-    result["optimized_ir"] = _inst_list(opt)
-    result["opt_stats"] = stats
-    result["stage_reached"] = "ir"
-
-    try:
-        before = run_ir(ir)
-        after = run_ir(opt)
-        result.update(output=before, optimized_output=after, equivalent=(before == after))
-        result["stage_reached"] = "executed"
-    except Exception as exc:
-        result["runtime_error"] = f"{type(exc).__name__}: {exc}"
-    return result
-
-
-def _ai_call(fn):
-    """Run an AI function and translate known failures into friendly API errors."""
-    _require_llm()
-    try:
-        return fn()
-    except ApiError:
-        raise
-    except Exception as exc:
-        name = type(exc).__name__
-        if name == "GuardrailSecurityException":
-            raise ApiError(f"Blocked by the AI security guardrail: {exc}", 403)
-        if name == "LLMCommunicationError":
-            raise ApiError(f"Could not reach the AI model: {exc}", 502)
-        raise ApiError(f"AI feature failed: {name}: {exc}", 500)
-
-
-def api_minic_ai(body: Dict[str, Any]) -> Dict[str, Any]:
-    code = _need_code(body)
-    action = body.get("action")
-    if action not in ("explain", "optimize", "bugs"):
-        raise ApiError("action must be one of: explain, optimize, bugs.")
-    _require_llm()
-
-    from core.lexer import Lexer
-    from core.parser import Parser
-    from core.semantic import SemanticAnalyzer
-
-    lexer = Lexer(code)
-    tokens = lexer.tokenize()
-    parser = Parser(tokens)
-    program = parser.parse()
-    if lexer.errors or parser.errors:
-        first = (lexer.errors or parser.errors)[0]
-        raise ApiError(f"Fix syntax errors first (line {first.line}): {first.message}", 422)
-
-    t0 = time.time()
-    if action == "explain":
-        from ai.phase_explainer import explain_compilation
-        data = _ai_call(lambda: explain_compilation(code))
-        return {"action": action, "result": _to_jsonable(data), "elapsed_s": round(time.time() - t0, 2)}
-
-    if action == "bugs":
-        from ai.bug_detector import detect_bugs
-        data = _ai_call(lambda: detect_bugs(code, ast=program))
-        return {"action": action, "result": _to_jsonable(data), "elapsed_s": round(time.time() - t0, 2)}
-
-    # optimize
-    from ai.ai_optimizer import ai_optimize_ir
-    from core.ir import generate_ir
-    analyzer = SemanticAnalyzer()
-    diags = analyzer.analyze(program)
-    if any(d.severity == "error" for d in diags):
-        raise ApiError(f"Fix semantic errors first: {diags[0].message}", 422)
-    ir = generate_ir(program)
-    data = _ai_call(lambda: ai_optimize_ir(ir))
-    before = [str(i) for i in data.get("initial_ir", ir)]
-    after = [str(i) for i in data.get("optimized_ir", ir)]
-    return {
-        "action": action,
-        "result": {
-            "analysis": data.get("analysis", ""),
-            "accepted": _to_jsonable(data.get("accepted_suggestions", [])),
-            "rejected": _to_jsonable(data.get("rejected_suggestions", [])),
-            "initial_count": data.get("initial_instruction_count", len(before)),
-            "final_count": data.get("final_instruction_count", len(after)),
-            "equivalence_verified": data.get("equivalence_verified"),
-            "ir_before": before,
-            "ir_after": after,
-            "ir_diff": _text_diff(before, after),
-        },
-        "elapsed_s": round(time.time() - t0, 2),
-    }
-
-
-def _text_diff(a: List[str], b: List[str]) -> List[Dict[str, Any]]:
-    return diff_lines("\n".join(a), "\n".join(b), 2)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # Status, samples, benchmark
 # ──────────────────────────────────────────────────────────────────────────────
-
-MINIC_SAMPLES = [
-    {"name": "Arithmetic & folding", "language": "minic", "code":
-     "int main() {\n    int a = 10 * 5 + 20;\n    int b = a + 30;\n    print(b);\n    return b;\n}\n"},
-    {"name": "Loop sum", "language": "minic", "code":
-     "int main() {\n    int i = 0;\n    int total = 0;\n    while (i < 10) {\n        total = total + i * 2;\n        i = i + 1;\n    }\n    print(total);\n    return 0;\n}\n"},
-    {"name": "Functions & recursion", "language": "minic", "code":
-     "int fact(int n) {\n    if (n <= 1) {\n        return 1;\n    }\n    return n * fact(n - 1);\n}\n\nint main() {\n    print(fact(5));\n    return 0;\n}\n"},
-    {"name": "Dead code", "language": "minic", "code":
-     "int main() {\n    int x = 42;\n    int unused = 100 * 20;\n    int y = x + 0;\n    print(y);\n    return 0;\n}\n"},
-    {"name": "Has semantic errors", "language": "minic", "code":
-     "int main() {\n    int a = 1;\n    int a = 2;\n    b = 3;\n    bool flag = 5;\n    return 0;\n}\n"},
-    {"name": "Has syntax errors", "language": "minic", "code":
-     "int main() {\n    int x = ;\n    if (x > 0 {\n        print(x);\n    }\n    return 0;\n}\n"},
-]
 
 CPP_SAMPLE_FILES = [
     "mini/tc01_missing_semicolon.cpp", "mini/tc02_undeclared_variable.cpp",
@@ -809,18 +566,8 @@ CPP_SAMPLE_FILES = [
 ]
 
 
-CPP_STARTERS = [
-    {"name": "Hello, world", "language": "cpp", "code":
-     '#include <iostream>\n\nint main() {\n    std::cout << "Hello, world!" << std::endl;\n    return 0;\n}\n'},
-    {"name": "Add two numbers (reads input)", "language": "cpp", "code":
-     '#include <iostream>\n\nint main() {\n    int a, b;\n    std::cout << "Enter two numbers: ";\n    std::cin >> a >> b;\n    std::cout << a << " + " << b << " = " << a + b << std::endl;\n    return 0;\n}\n'},
-    {"name": "Fibonacci with a function", "language": "cpp", "code":
-     '#include <iostream>\n\nint fib(int n) {\n    if (n < 2) return n;\n    return fib(n - 1) + fib(n - 2);\n}\n\nint main() {\n    for (int i = 0; i < 10; ++i) {\n        std::cout << fib(i) << " ";\n    }\n    std::cout << std::endl;\n    return 0;\n}\n'},
-]
-
-
 def api_samples() -> Dict[str, Any]:
-    samples = list(MINIC_SAMPLES) + [dict(x) for x in CPP_STARTERS]
+    samples: List[Dict[str, Any]] = []
     for rel in CPP_SAMPLE_FILES:
         p = ROOT_DIR / "test_cases" / rel
         if p.is_file() and p.stat().st_size < 20_000:
@@ -845,6 +592,8 @@ def api_status() -> Dict[str, Any]:
         "gxx": gxx_available(),
         "clang": bool(shutil_which("clang++")),
         "heal_attempts": HEAL_ATTEMPTS,
+        "run_enabled": RUN_ENABLED,
+        "run_timeout_s": RUN_TIMEOUT_S,
     }
 
 
@@ -877,12 +626,6 @@ def api_benchmark() -> Dict[str, Any]:
     def pct(a, b):
         return round(100.0 * a / b, 1) if b else None
 
-    verifier = [r for r in rows if r.get("suite") == "ai_optimizer"]
-    live = [r for r in rows if r.get("suite") == "live_llm_optimizer"]
-
-    def sums(rs, k):
-        return int(sum(_num(r, k) or 0 for r in rs))
-
     return {
         "healing": {
             "total_fixtures": len(healing),
@@ -904,39 +647,12 @@ def api_benchmark() -> Dict[str, Any]:
             "classifier_accuracy": pct(len(clf_ok), len(healing)),
             "note": "'Fixed' means the file now compiles; it does not prove the program still behaves correctly.",
         },
-        "verifier": {
-            "programs": len(verifier),
-            "proposed": sums(verifier, "suggestions_proposed"),
-            "accepted": sums(verifier, "suggestions_accepted"),
-            "rejected": sums(verifier, "suggestions_rejected"),
-            "note": "Scripted test of the equivalence checker with hand-written good and bad suggestions. Not an AI result.",
-        },
-        "live_optimizer": {
-            "programs": len(live),
-            "proposed": sums(live, "suggestions_proposed"),
-            "accepted": sums(live, "suggestions_accepted"),
-            "rejected": sums(live, "suggestions_rejected"),
-            "ir_removed": sums(live, "instruction_delta") * -1,
-            "note": "Real Gemini suggestions on MiniC programs, accepted only if program output is unchanged.",
-        },
         "per_file": [
             {"file": os.path.basename(r.get("file", "")),
              "baseline_clean": str(r.get("baseline_clean", "")).lower() == "true",
              "rule": r.get("rule_compiled"), "ai": r.get("llm_compiled"),
              "rule_time": _num(r, "rule_time_sec"), "ai_time": _num(r, "llm_time_sec")}
             for r in healing
-        ],
-        "live_rows": [
-            {"file": r.get("file"), "proposed": _num(r, "suggestions_proposed"),
-             "accepted": _num(r, "suggestions_accepted"), "rejected": _num(r, "suggestions_rejected"),
-             "initial": _num(r, "initial_instructions"), "final": _num(r, "final_instructions")}
-            for r in live
-        ],
-        "verifier_rows": [
-            {"file": r.get("file"), "proposed": _num(r, "suggestions_proposed"),
-             "accepted": _num(r, "suggestions_accepted"), "rejected": _num(r, "suggestions_rejected"),
-             "reason": r.get("rejection_reasons")}
-            for r in verifier
         ],
     }
 
@@ -947,11 +663,10 @@ def api_benchmark() -> Dict[str, Any]:
 
 POST_ROUTES = {
     "/api/cpp/analyze": api_cpp_analyze,
-    "/api/cpp/run": api_cpp_run,
     "/api/cpp/heal": api_cpp_heal,
+    "/api/cpp/compile": api_cpp_compile,
+    "/api/cpp/run": api_cpp_run,
     "/api/cpp/ast": api_cpp_ast,
-    "/api/minic/pipeline": api_minic_pipeline,
-    "/api/minic/ai": api_minic_ai,
 }
 GET_ROUTES = {
     "/api/status": api_status,
@@ -1034,7 +749,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def make_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
+    global RUN_ENABLED
     _load_env()
+    RUN_ENABLED = host in ("127.0.0.1", "localhost", "::1")
     srv = ThreadingHTTPServer((host, port), Handler)
     srv.daemon_threads = True
     return srv

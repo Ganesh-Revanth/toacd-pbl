@@ -18,11 +18,11 @@ The **Green Self-Healing Compiler** is an educational and developer-assistance m
 | :--- | :--- |
 | **Compiler Diagnostic** | Any message (error, fatal error, warning, note) emitted by `g++` to `stderr` describing a syntactic, semantic, or linking issue. |
 | **Diagnostic Capture** | Intercepting, filtering, and parsing raw compiler `stderr` text streams into structured, machine-usable data structures. |
-| **Lexical Analysis (Scanning)** | Breaking character streams into atomic tokens. Implemented both via `src/core/lexer.py` (formal tokenizing scanner for MiniC) and via regex tokenizers in the C++ diagnostic pipeline. |
-| **AST (Abstract Syntax Tree)** | A typed tree representation of program structure. Implemented in `src/core/parser.py` (recursive descent AST construction for MiniC) and supported via `ast_extractor.py` (clang++ AST dumps for C++). |
-| **Semantic Analysis** | Checking type compatibility, declaration validity, and scope rules. |
-| **Symbol Table** | An associative data structure tracking identifier names, types, and lexical scope depths. Implemented in `src/core/semantic.py` featuring dedicated `Scope`, `Symbol`, and `SymbolTable` classes with hierarchical parent resolution. |
-| **Intermediate Representation (IR)** | A language-independent representation of code between frontend and backend. Implemented as Three-Address Code (TAC) quadruples with control-flow lowering in `src/core/ir.py`, executed via a virtual TAC interpreter in `src/core/interpreter.py`. Diagnostic records for C++ compiler errors are represented via `CompilerError` in `src/models.py`. |
+| **Lexical Analysis (Scanning)** | Breaking character streams into atomic tokens. Handled in the C++ diagnostic pipeline via regex scanners and token normalizers. |
+| **AST (Abstract Syntax Tree)** | A typed tree representation of program structure. Supported for C++ via st_extractor.py (filtered clang++ AST dumps). |
+| **Semantic Analysis** | Checking type compatibility, declaration validity, and scope rules during C++ compilation. |
+| **Symbol Table** | An associative data structure tracking identifier names, types, and lexical scope depths. Used in uto_healer.py for mapping missing symbols to C++ standard headers. |
+| **Intermediate Representation (IR)** | Structured internal representation of diagnostic records via CompilerError dataclasses in src/models.py for multi-stage classification, explanation, and automated repair. |
 | **Peephole Transformation** | A local code transformation technique operating on a narrow sliding window of lines to correct localized syntax errors (e.g., missing semicolons, flipped stream operators). |
 | **Automated Program Repair (APR)** | Automated generation and validation of source code patches to eliminate errors. |
 | **Static Security Analysis** | Lexical and scope-depth pattern analysis scanning for memory safety flaws (buffer overflows, format strings, `system()` calls) without executing the binary. |

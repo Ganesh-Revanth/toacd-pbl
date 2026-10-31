@@ -45,20 +45,7 @@ async function pageBenchmark(root) {
     el('label', { style: 'display:flex;gap:8px;align-items:center;margin-bottom:8px' }, onlyBroken, 'Only files that needed repair'),
     el('div', { class: 'scroll' }, el('table', { class: 'data' },
       el('thead', null, el('tr', null, el('th', { text: 'File' }), el('th', { class: 'num', text: 'Rules' }), el('th', { class: 'num', text: 'Gemini' }), el('th', { class: 'num', text: 'Rules (s)' }), el('th', { class: 'num', text: 'Gemini (s)' }))), tbody)));
-
-  const v = b.verifier, l = b.live_optimizer;
-  host.append(
-    el('h2', { style: 'margin-top:40px', text: 'Optimization safety' }),
-    el('div', { class: 'cols2', style: 'margin-top:12px' },
-      el('div', { class: 'panel' }, el('div', { class: 'panel-body' }, el('h3', { text: 'Verifier test (scripted)' }),
-        el('p', { class: 'muted', style: 'margin:6px 0 10px', text: v.note }),
-        el('dl', { class: 'kv' }, kv('Programs', v.programs), kv('Suggestions', v.proposed), kv('Admitted', v.accepted), kv('Blocked', v.rejected)))),
-      el('div', { class: 'panel' }, el('div', { class: 'panel-body' }, el('h3', { text: 'Live Gemini suggestions' }),
-        el('p', { class: 'muted', style: 'margin:6px 0 10px', text: l.note }),
-        el('dl', { class: 'kv' }, kv('Programs', l.programs), kv('Suggestions', l.proposed), kv('Kept', l.accepted), kv('Rejected', l.rejected), kv('Instructions removed', l.ir_removed))))),
-    el('p', { class: 'faint', style: 'margin-top:12px;max-width:70ch', text: 'The check compares program output on one run. That is strong testing, not a proof of equivalence, and the set is small (' + l.programs + ' programs). Treat it as evidence the mechanism works, not a measure of Gemini’s skill.' }));
 }
-const kv = (k, v) => el('div', null, el('dt', { text: k }), el('dd', { text: String(v) }));
 
 /* ── Architecture diagrams ───────────────────────────────────────────── */
 function Box(n) {
@@ -112,39 +99,32 @@ const BEFORE = {
 };
 
 const AFTER = {
-  id: 'after', w: 1060, h: 700, label: 'Architecture after: the C++ track gains an AI healing tier with reviewable diffs; a new AI layer with an LLM client and security guardrail serves the explainer, optimizer and bug detector; a MiniC compiler core with an interpreter verifies AI proposals; PyQt and web interfaces and a benchmark harness sit on top.',
-  bands: [{ y: 12, h: 188, t: 'C++ track' }, { y: 212, h: 168, t: 'AI layer' }, { y: 392, h: 120, t: 'MiniC compiler core (src/core)' }, { y: 524, h: 164, t: 'Interfaces & evidence' }],
+  id: 'after', w: 1060, h: 480, label: 'Architecture after: C++ compiler pipeline with two-tier self-healing (rule-based and Gemini agent) with interactive diff review; backed by an LLM client and security guardrail; PyQt6 desktop app, web studio, and benchmark harness sit on top.',
+  bands: [
+    { y: 12, h: 188, t: 'C++ self-healing track' },
+    { y: 212, h: 100, t: 'AI layer & security' },
+    { y: 324, h: 140, t: 'Interfaces & evidence' }
+  ],
   nodes: [
     N('src', 24, 56, 150, 60, 'C++ source'),
     N('gxx', 200, 56, 170, 60, 'g++ + diagnostics', 'runner, parser, normalizer'),
     N('clf', 396, 56, 170, 60, 'Classifier + explainer', 'ML + glossary'),
-    N('rul', 612, 44, 200, 52, 'Tier 1: rule healer', 'auto_healer (fixed)'),
+    N('rul', 612, 44, 200, 52, 'Tier 1: rule healer', 'auto_healer (deterministic)'),
     N('ai1', 612, 116, 200, 60, 'Tier 2: Gemini agent', 'ReAct loop, up to 6 steps'),
     N('acc', 850, 78, 186, 60, 'Diff → accept / reject', 'nothing applied silently', true),
-    N('llm', 24, 256, 210, 60, 'LLM client', 'cache · retry · mock mode', true),
-    N('grd', 262, 256, 210, 60, 'Security guardrail', 'checks prompts and patches'),
-    N('exr', 520, 238, 190, 40, 'Phase explainer', null, true),
-    N('opt', 520, 288, 190, 40, 'AI optimizer', null, true),
-    N('bug', 520, 338, 190, 34, 'Bug detector', null, true),
-    N('lex', 24, 430, 140, 60, 'Lexer', 'tokens', true),
-    N('prs', 190, 430, 140, 60, 'Parser', 'recursive descent, AST', true),
-    N('sem', 356, 430, 140, 60, 'Semantic', 'scopes, types', true),
-    N('ir', 522, 430, 140, 60, 'TAC IR', 'three-address code', true),
-    N('op', 688, 430, 150, 60, 'Optimizer', '5 classic passes', true),
-    N('int', 864, 430, 172, 60, 'Interpreter', 'verifies AI proposals', true),
-    N('qt', 24, 568, 220, 60, 'PyQt6 desktop app', 'kept as it was'),
-    N('web', 270, 568, 220, 60, 'Web studio', 'this app', true),
-    N('bm', 516, 568, 250, 60, 'Benchmark harness', 'rules vs AI, verifier tests', true),
-    N('csv', 792, 568, 244, 60, 'results/final.csv', 'figures on the Benchmark page', true),
+    N('grd', 340, 236, 230, 60, 'Security guardrail', 'aai_guardrail.py (checks prompts/patches)'),
+    N('llm', 612, 236, 200, 60, 'LLM client', 'cache · retry · mock mode', true),
+    N('qt', 24, 360, 220, 60, 'PyQt6 desktop app', 'compiler, healing, AST, graph'),
+    N('web', 270, 360, 220, 60, 'Web studio', 'C++ Studio · diffs · benchmark', true),
+    N('bm', 516, 360, 250, 60, 'Benchmark harness', '51 C++ fixtures (healing suite)', true),
+    N('csv', 792, 360, 244, 60, 'results/final.csv', 'accuracy & heal rate evidence', true),
   ],
   edges: [
     { d: 'M174 86 H200' }, { d: 'M370 86 H396' }, { d: 'M566 86 H612' }, { d: 'M566 96 H590 V146 H612' },
     { d: 'M812 70 H831 V108 H850' }, { d: 'M812 146 H831 V108' },
-    { d: 'M712 176 V196 H367 V256', dash: true, label: 'every call is checked', lx: 400, ly: 190 },
-    { d: 'M234 286 H262', dash: true }, { d: 'M472 286 H496 V258 H520', dash: true }, { d: 'M496 286 V308 H520', dash: true }, { d: 'M496 286 V355 H520', dash: true },
-    { d: 'M164 460 H190' }, { d: 'M330 460 H356' }, { d: 'M496 460 H522' }, { d: 'M662 460 H688' }, { d: 'M838 460 H864' },
-    { d: 'M710 308 H950 V430', dash: true, label: 'AI proposes, interpreter verifies', lx: 722, ly: 302 },
-    { d: 'M766 598 H792' },
+    { d: 'M712 176 V200 H455 V236', dash: true, label: 'calls checked by guardrail', lx: 470, ly: 195 },
+    { d: 'M570 266 H612', dash: true },
+    { d: 'M766 390 H792' },
   ],
 };
 
@@ -162,7 +142,7 @@ function pageArchitecture(root) {
         v === 'after' ? el('span', null, el('i', { class: 'dash' }), 'Dashed line = AI traffic or verification') : null),
       el('p', { class: 'muted', style: 'margin-top:16px;max-width:72ch', text: v === 'before'
         ? 'The original tool wrapped g++: it parsed compiler messages, classified them, explained them and applied hand-written repair rules.'
-        : 'The new version keeps that pipeline and adds: a MiniC compiler core that owns every phase, an AI layer (shared LLM client, phase explainer, optimizer, bug detector) where the interpreter checks whatever the model proposes, repair proposals shown as a diff you must accept, and a benchmark harness. The Gemini agent and security guardrail were already in the repository but missing from the original documentation, so they are not marked as new.' }));
+        : 'The improved architecture wraps g++ with a two-tier self-healing pipeline: fast deterministic rule repair (Tier 1) backed by an LLM agent (Tier 2) when rules fail. Every AI call is protected by a security guardrail, all proposed patches require user approval via diff review before applying, and the system is verified by a 51-fixture benchmark harness across desktop PyQt and web studio interfaces.' }));
   }
   root.append(el('div', { class: 'page-head' }, el('div', null, el('h1', { text: 'Architecture' }),
     el('p', { text: 'How the project looked before this work and how it is organised now. Box subtitles name the source files.' })),

@@ -3,13 +3,8 @@
 
 const ROUTES = [
   { group: 'Work', items: [
-    { id: 'workspace', label: 'C++ workspace', title: 'C++ workspace', render: pageWorkspace },
+    { id: 'workspace', label: 'C++ Studio', title: 'C++ Studio', render: pageWorkspace },
     { id: 'changes', label: 'Changes', title: 'Changes', render: pageChanges, badge: true },
-  ] },
-  { group: 'Compiler', items: [
-    { id: 'pipeline', label: 'MiniC pipeline', title: 'MiniC pipeline', render: pagePipeline },
-    { id: 'ast', label: 'Syntax tree', title: 'Syntax tree', render: pageAst },
-    { id: 'ai', label: 'AI insights', title: 'AI insights', render: pageAI },
   ] },
   { group: 'Evidence', items: [
     { id: 'benchmark', label: 'Benchmark', title: 'Benchmark', render: pageBenchmark },
@@ -81,9 +76,9 @@ async function boot() {
     return;
   }
   const firstCpp = state.samples.find(s => s.language === 'cpp');
-  const firstMini = state.samples.find(s => s.language === 'minic');
-  if (!state.cpp.code && firstCpp) state.cpp.code = firstCpp.code;
-  if (!state.minic.code && firstMini) state.minic.code = firstMini.code;
+  const draft = store.get('cppDraft', null);
+  if (draft && typeof draft.code === 'string' && draft.code.trim()) { state.cpp.code = draft.code; state.cpp.name = draft.name || 'main.cpp'; }
+  else if (firstCpp) { state.cpp.code = firstCpp.code; state.cpp.name = 'main.cpp'; }
   buildStatus();
   window.addEventListener('hashchange', route);
   route();
