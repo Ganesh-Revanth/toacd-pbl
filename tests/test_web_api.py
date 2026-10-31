@@ -90,6 +90,21 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(d["ai_ready"])
         self.assertFalse(d["llm_mock"])
 
+    def test_status_includes_languages(self):
+        status, body = self.get("/api/status")
+        d = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertIn("languages", d)
+        cpp_entry = next((item for item in d["languages"] if item["id"] == "cpp"), None)
+        self.assertIsNotNone(cpp_entry)
+        self.assertEqual(cpp_entry["name"], "C++")
+        self.assertIn("available", cpp_entry)
+
+    def test_unsupported_language_returns_400(self):
+        status, d = self.post("/api/cpp/analyze", {"code": "int main(){}", "language": "nonexistent_lang"})
+        self.assertEqual(status, 400)
+        self.assertIn("error", d)
+
     def test_samples_include_cpp_language(self):
         d = json.loads(self.get("/api/samples")[1])
         langs = {s["language"] for s in d["samples"]}

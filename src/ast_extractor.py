@@ -114,7 +114,7 @@ def _trim_details(details):
     return details
 
 
-def extract_ast(file_path):
+def extract_ast(file_path, extra_args=None):
     """Return a compact clang AST dump containing only user-file subtrees."""
     cmd = [
         "clang++",
@@ -122,8 +122,12 @@ def extract_ast(file_path):
         "-ast-dump",
         "-fsyntax-only",
         "-fno-color-diagnostics",
-        file_path,
     ]
+    if extra_args:
+        cmd.extend(extra_args)
+    elif file_path.endswith(".c"):
+        cmd.extend(["-x", "c"])
+    cmd.append(file_path)
 
     try:
         process = subprocess.Popen(

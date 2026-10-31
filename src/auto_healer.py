@@ -41,6 +41,25 @@ _SYMBOL_TO_HEADER = {
     "size_t": "cstddef",  "nullptr": "",          "NULL": "cstdlib",
 }
 
+_C_SYMBOL_TO_HEADER = {
+    # I/O
+    "printf": "stdio.h", "scanf": "stdio.h", "fprintf": "stdio.h",
+    "puts": "stdio.h", "gets": "stdio.h", "getchar": "stdio.h", "putchar": "stdio.h",
+    "fopen": "stdio.h", "fclose": "stdio.h", "sprintf": "stdio.h", "snprintf": "stdio.h",
+    # stdlib
+    "malloc": "stdlib.h", "calloc": "stdlib.h", "realloc": "stdlib.h",
+    "free": "stdlib.h", "exit": "stdlib.h", "abort": "stdlib.h", "atoi": "stdlib.h", "rand": "stdlib.h",
+    # string
+    "strlen": "string.h", "strcpy": "string.h", "strncpy": "string.h",
+    "strcmp": "string.h", "strncmp": "string.h", "strcat": "string.h",
+    "memcpy": "string.h", "memset": "string.h",
+    # math
+    "sqrt": "math.h", "pow": "math.h", "sin": "math.h", "cos": "math.h", "fabs": "math.h",
+    # stdbool / stdint
+    "bool": "stdbool.h", "true": "stdbool.h", "false": "stdbool.h",
+    "uint32_t": "stdint.h", "int32_t": "stdint.h", "uint64_t": "stdint.h",
+}
+
 # std:: symbols most commonly needing prefix
 _STD_SYMBOLS = {
     "cout", "cin", "cerr", "endl", "string", "vector", "map", "set",
@@ -209,6 +228,8 @@ _UNDECLARED_IDENTIFIER_PHRASES = (
     "was not declared in this scope",
     "use of undeclared identifier",
     "undeclared identifier",
+    "undeclared (first use in this function)",
+    "undeclared",
     "identifier not found",
     "is undefined",
 )
@@ -564,7 +585,16 @@ def fix_missing_include(source: str, error: dict) -> Optional[str]:
     sym = _extract_symbol(msg)
     if not sym:
         return None
-    header = _SYMBOL_TO_HEADER.get(sym)
+    is_c = (
+        error.get("language") == "c"
+        or str(error.get("file", "")).endswith(".c")
+        or "<stdio.h>" in source
+        or ("<iostream>" not in source and "std::" not in source and "#include" in source)
+    )
+    if is_c and sym in _C_SYMBOL_TO_HEADER:
+        header = _C_SYMBOL_TO_HEADER[sym]
+    else:
+        header = _SYMBOL_TO_HEADER.get(sym) or _C_SYMBOL_TO_HEADER.get(sym)
     if not header:
         return None
     if _has_include(source, header):
@@ -603,7 +633,7 @@ def fix_syntax_error(source: str, error: dict) -> Optional[str]:
         return _join(lines)
 
     # Fix: missing closing brace at end of input
-    if "expected '}' at end of input" in msg or "expected '}'" in msg:
+    if "expected '}' at end of input" in msg or "expected '}'" in msg or "at end of input" in msg:
         patched = fix_missing_closing_braces(source, error)
         if patched is not None and patched != source:
             return patched
@@ -764,17 +794,25 @@ def fix_undeclared_variable(source: str, error: dict) -> Optional[str]:
         if decl_pattern.search(existing):
             return None
 
+    is_c = (
+        error.get("language") == "c"
+        or str(error.get("file", "")).endswith(".c")
+        or "<stdio.h>" in source
+        or ("<iostream>" not in source and "std::" not in source)
+    )
+    type_decl = "int" if is_c else "auto"
+
     indent = re.match(r"^(\s*)", lines[idx]).group(1)
     direct_assign = re.match(rf"^\s*{re.escape(var)}\s*=\s*(.+?)\s*;\s*$", lines[idx])
     if direct_assign:
-        lines[idx] = f"{indent}auto {lines[idx].lstrip()}"
+        lines[idx] = f"{indent}{type_decl} {lines[idx].lstrip()}"
         return _join(lines)
 
     initializer = _infer_undeclared_initializer(lines[idx], var)
     if initializer is None:
         return None
 
-    lines.insert(idx, f"{indent}auto {var} = {initializer};\n")
+    lines.insert(idx, f"{indent}{type_decl} {var} = {initializer};\n")
     return _join(lines)
 
 
@@ -1175,7 +1213,7 @@ def attempt_fix(source: str, error: dict) -> Optional[str]:
     msg = error.get("message", "").lower()
 
     # Rule: Treat "function definition not allowed here" as missing_closing_brace
-    if "not allowed here" in msg or category == "missing_closing_brace":
+    if "not allowed here" in msg or category == "missing_closing_brace" or "at end of input" in msg:
         patched = fix_missing_closing_braces(source, error)
         if patched is not None and patched != source:
             return patched
@@ -1189,6 +1227,12 @@ def attempt_fix(source: str, error: dict) -> Optional[str]:
     # Explicit check for redeclaration / redefinition errors
     if "redeclaration" in msg or "redefinition" in msg or "previously declared here" in msg or category == "redefinition":
         patched = fix_redefinition(source, error)
+        if patched is not None and patched != source:
+            return patched
+
+    # Rule: implicit function declaration (missing include in C)
+    if "implicit declaration of function" in msg or "implicit-function-declaration" in msg:
+        patched = fix_missing_include(source, error)
         if patched is not None and patched != source:
             return patched
 

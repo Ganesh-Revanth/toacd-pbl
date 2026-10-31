@@ -52,6 +52,9 @@ STATIC_DIR = WEB_DIR / "static"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from languages import Language, NotSupported, ToolchainNotFound, get_language, list_languages
+from languages.cpp import CppLanguage, OUT_NAME, _ERR_PATTERN
+
 MAX_BODY_BYTES = 1_000_000
 COMPILE_TIMEOUT_S = 30
 HEAL_ATTEMPTS = 3
@@ -119,6 +122,16 @@ def _to_jsonable(obj: Any) -> Any:
     return str(obj)
 
 
+def _get_lang(body: Dict[str, Any]) -> Language:
+    lang_id = body.get('language', 'cpp')
+    if not isinstance(lang_id, str) or not lang_id.strip():
+        lang_id = 'cpp'
+    lang = get_language(lang_id)
+    if not lang:
+        raise ApiError(f"Unsupported language: '{lang_id}'", 400)
+    return lang
+
+
 def _need_code(body: Dict[str, Any]) -> str:
     code = body.get("code")
     if not isinstance(code, str) or not code.strip():
@@ -182,129 +195,26 @@ def _classify(errors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def compile_cpp(code: str, workdir: str) -> Tuple[List[Dict[str, Any]], str, str]:
     """Compile `code` with g++ inside workdir. Returns (errors, stderr, source_path)."""
-    from compiler_runner import _sanitize_code, get_compiler_cmd_and_env
-
-    src = os.path.join(workdir, "main.cpp")
-    with open(src, "w", encoding="utf-8") as f:
-        f.write(code)
-
-    if not _sanitize_code(code):
-        return ([{
-            "file": src, "line": 1, "column": 1, "type": "error",
-            "message": "Security Error: Malicious command injection or forbidden system call detected.",
-            "raw": "error: Malicious code blocked",
-            "category": "security_violation", "confidence": 1.0,
-        }], "error: Malicious code blocked", src)
-
-    gxx, env = get_compiler_cmd_and_env()
-    # ASCII diagnostics: GCC prints curly quotes in UTF-8 locales, which breaks pattern matching.
-    env = {**env, "LC_ALL": "C", "LANGUAGE": "C"}
+    lang = get_language("cpp")
+    if not lang:
+        raise ApiError("C++ language driver not available.", 500)
     try:
-        res = subprocess.run(
-            [gxx, "-std=c++17", "-Wall", src, "-o", os.path.join(workdir, OUT_NAME)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
-            cwd=workdir, timeout=COMPILE_TIMEOUT_S,
-        )
+        errors = lang.check(code, workdir)
+    except ToolchainNotFound as e:
+        raise ApiError(str(e), 503)
     except FileNotFoundError:
         raise ApiError("g++ was not found on this machine. Install a C++ toolchain and restart.", 503)
-    except subprocess.TimeoutExpired:
-        return ([{
-            "file": src, "line": 1, "column": 1, "type": "error",
-            "message": f"Compilation timed out after {COMPILE_TIMEOUT_S}s.",
-            "raw": "timeout", "category": "other", "confidence": 1.0,
-        }], "timeout", src)
-
-    errors: List[Dict[str, Any]] = []
-    for line in res.stderr.splitlines():
-        m = _ERR_PATTERN.match(line.strip())
-        if m:
-            errors.append({
-                "file": m.group(1), "line": int(m.group(2)), "column": int(m.group(3)),
-                "type": m.group(4), "message": m.group(5), "raw": line,
-            })
-    if res.returncode != 0 and not errors:
-        first = res.stderr.strip().splitlines()[0] if res.stderr.strip() else "Compilation failed"
-        errors.append({
-            "file": src, "line": 1, "column": 1, "type": "error",
-            "message": first, "raw": first, "category": "other", "confidence": 0.5,
-        })
-    return errors, res.stderr, src
-
-
-def _limit_child() -> None:  # pragma: no cover - runs in the child, POSIX only
-    import resource
-    resource.setrlimit(resource.RLIMIT_CPU, (RUN_TIMEOUT_S + 2, RUN_TIMEOUT_S + 2))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (RUN_OUTPUT_CAP * 4, RUN_OUTPUT_CAP * 4))
-    resource.setrlimit(resource.RLIMIT_NPROC, (64, 64)) if hasattr(resource, "RLIMIT_NPROC") else None
-    try:
-        resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
-    except (ValueError, OSError):
-        pass
+    stderr = getattr(lang, "last_stderr", "")
+    src = os.path.join(workdir, "main.cpp")
+    return errors, stderr, src
 
 
 def _run_binary(exe: str, workdir: str, stdin_text: str, env: Dict[str, str]) -> Dict[str, Any]:
     """Run a compiled program with a timeout, an output cap and (on POSIX) resource limits."""
-    t0 = time.time()
-    kw: Dict[str, Any] = {}
-    if os.name != "nt":
-        kw["preexec_fn"] = _limit_child
-    proc = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            cwd=workdir, env=env, **kw)
-    chunks = {"out": bytearray(), "err": bytearray()}
-    truncated = threading.Event()
-
-    def pump(stream, key):
-        try:
-            while True:
-                b = stream.read(4096)
-                if not b:
-                    return
-                room = RUN_OUTPUT_CAP - len(chunks[key])
-                if room > 0:
-                    chunks[key] += b[:room]
-                if len(b) > room:
-                    truncated.set()
-                    proc.kill()
-                    return
-        except Exception:
-            return
-
-    readers = [threading.Thread(target=pump, args=(proc.stdout, "out"), daemon=True),
-               threading.Thread(target=pump, args=(proc.stderr, "err"), daemon=True)]
-    for r in readers:
-        r.start()
-
-    def feed():
-        try:
-            proc.stdin.write(stdin_text.encode("utf-8"))
-        except Exception:
-            pass
-        finally:
-            try:
-                proc.stdin.close()
-            except Exception:
-                pass
-    threading.Thread(target=feed, daemon=True).start()
-
-    timed_out = False
-    try:
-        proc.wait(timeout=RUN_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        proc.kill()
-        proc.wait()
-    for r in readers:
-        r.join(timeout=1)
-    code = proc.returncode
-    return {
-        "stdout": chunks["out"].decode("utf-8", "replace"),
-        "stderr": chunks["err"].decode("utf-8", "replace"),
-        "exit_code": code,
-        "timed_out": timed_out,
-        "truncated": truncated.is_set(),
-        "crashed": (not timed_out) and not truncated.is_set() and code is not None and (code < 0 or code >= 0xC0000000),
-        "run_s": round(time.time() - t0, 3),
-    }
+    lang = get_language("cpp")
+    if isinstance(lang, CppLanguage):
+        return lang._run_binary(exe, workdir, stdin_text, env, timeout=RUN_TIMEOUT_S)
+    return CppLanguage()._run_binary(exe, workdir, stdin_text, env, timeout=RUN_TIMEOUT_S)
 
 
 def api_cpp_compile(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -317,13 +227,21 @@ def api_cpp_run(body: Dict[str, Any]) -> Dict[str, Any]:
     if not RUN_ENABLED:
         raise ApiError("Running programs is disabled because the server is not bound to this machine only.", 403)
     code = _need_code(body)
+    lang = _get_lang(body)
     stdin_text = body.get("stdin", "")
     if not isinstance(stdin_text, str) or len(stdin_text) > RUN_STDIN_CAP:
         raise ApiError("stdin must be text of at most 64 KB.")
-    from compiler_runner import get_compiler_cmd_and_env
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="webui_") as wd:
-        errors, stderr, src = compile_cpp(code, wd)
+        try:
+            errors = lang.check(code, wd)
+        except ToolchainNotFound as e:
+            raise ApiError(str(e), 503)
+        except FileNotFoundError:
+            raise ApiError(f"{lang.name} compiler was not found on this machine. Install toolchain and restart.", 503)
+        stderr = getattr(lang, "last_stderr", "")
+        ext = lang.extensions[0] if lang.extensions else ".cpp"
+        src = os.path.join(wd, f"main{ext}")
         _classify(errors)
         enriched = _enrich(errors, src)
         hard = sum(1 for e in enriched if e["type"] == "error")
@@ -332,10 +250,8 @@ def api_cpp_run(body: Dict[str, Any]) -> Dict[str, Any]:
             "warning_count": sum(1 for e in enriched if e["type"] == "warning"),
             "diagnostics": enriched, "raw_stderr": stderr.strip(), "ran": False,
         }
-        exe = os.path.join(wd, OUT_NAME)
-        if hard == 0 and os.path.isfile(exe):
-            _, env = get_compiler_cmd_and_env()   # same PATH as the compiler, so MinGW runtime DLLs resolve
-            result.update(_run_binary(exe, wd, stdin_text, env))
+        if hard == 0:
+            result.update(lang.run(code, wd, stdin=stdin_text, timeout=RUN_TIMEOUT_S))
             result["ran"] = True
     result["elapsed_s"] = round(time.time() - t0, 3)
     return result
@@ -378,9 +294,18 @@ def _security_findings(src_path: str) -> List[Dict[str, Any]]:
 
 def api_cpp_analyze(body: Dict[str, Any]) -> Dict[str, Any]:
     code = _need_code(body)
+    lang = _get_lang(body)
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="webui_") as wd:
-        errors, stderr, src = compile_cpp(code, wd)
+        try:
+            errors = lang.check(code, wd)
+        except ToolchainNotFound as e:
+            raise ApiError(str(e), 503)
+        except FileNotFoundError:
+            raise ApiError(f"{lang.name} compiler was not found on this machine. Install toolchain and restart.", 503)
+        stderr = getattr(lang, "last_stderr", "")
+        ext = lang.extensions[0] if lang.extensions else ".cpp"
+        src = os.path.join(wd, f"main{ext}")
         _classify(errors)
         enriched = _enrich(errors, src)
         security = _security_findings(src)
@@ -413,6 +338,7 @@ def _pick_fix_target(issues, skipped):
 def api_cpp_heal(body: Dict[str, Any]) -> Dict[str, Any]:
     """Rule-based or AI healing. Returns a PROPOSAL (original, patched, diff, steps)."""
     code = _need_code(body)
+    lang = _get_lang(body)
     mode = body.get("mode", "rules")
     if mode == "ai":
         return _heal_ai(code)
@@ -425,9 +351,15 @@ def api_cpp_heal(body: Dict[str, Any]) -> Dict[str, Any]:
     steps: List[Dict[str, Any]] = []
     current = code
     skipped: set = set()
+    ext = lang.extensions[0] if lang.extensions else ".cpp"
     with tempfile.TemporaryDirectory(prefix="webui_") as wd:
         for attempt in range(1, HEAL_ATTEMPTS + 1):
-            errors, _, _ = compile_cpp(current, wd)
+            try:
+                errors = lang.check(current, wd)
+            except ToolchainNotFound as e:
+                raise ApiError(str(e), 503)
+            except FileNotFoundError:
+                raise ApiError(f"{lang.name} compiler was not found on this machine.", 503)
             _classify(errors)
             target = _pick_fix_target(errors, skipped)
             if target is None:
@@ -449,8 +381,9 @@ def api_cpp_heal(body: Dict[str, Any]) -> Dict[str, Any]:
                 "diff": diff_lines(current, patched, 1),
             })
             current = patched
-        final_errors, _, src = compile_cpp(current, wd)
+        final_errors = lang.check(current, wd)
         _classify(final_errors)
+        src = os.path.join(wd, f"main{ext}")
         remaining = _enrich(final_errors, src)
 
     hard = sum(1 for e in remaining if e["type"] == "error")
@@ -503,18 +436,14 @@ def _heal_ai(code: str) -> Dict[str, Any]:
 
 def api_cpp_ast(body: Dict[str, Any]) -> Dict[str, Any]:
     code = _need_code(body)
-    from ast_extractor import extract_ast, parse_ast_to_tree
-    if not shutil_which("clang++"):
-        raise ApiError("clang++ was not found. Install clang to use the C++ AST view.", 503)
-    with tempfile.TemporaryDirectory(prefix="webui_") as wd:
-        src = os.path.join(wd, "main.cpp")
-        with open(src, "w", encoding="utf-8") as f:
-            f.write(code)
-        text = extract_ast(src)
-        tree = parse_ast_to_tree(text, src)
-        # hide the temp directory in node details
-        scrubbed = _scrub_paths(_to_jsonable(tree), [wd + os.sep, wd.replace("\\", "/") + "/", wd])
-    return {"tree": scrubbed, "node_count": _count_nodes(tree)}
+    lang = _get_lang(body)
+    try:
+        scrubbed = lang.tree(code)
+    except NotSupported as exc:
+        raise ApiError(str(exc), 503)
+    except Exception as exc:
+        raise ApiError(f"AST extraction failed: {exc}", 500)
+    return {"tree": scrubbed, "node_count": _count_nodes(scrubbed)}
 
 
 def _scrub_paths(obj: Any, prefixes: List[str]) -> Any:
@@ -545,6 +474,9 @@ def shutil_which(name: str) -> Optional[str]:
 
 def gxx_available() -> bool:
     """Same lookup the compiler uses, so Windows installs outside PATH (MSYS2, MinGW, w64devkit) are found."""
+    lang = get_language("cpp")
+    if lang:
+        return lang.toolchain_available()
     try:
         from compiler_runner import get_compiler_cmd_and_env
         import shutil
@@ -584,6 +516,10 @@ def api_status() -> Dict[str, Any]:
         model = DEFAULT_MODEL
     except Exception:
         pass
+    languages_info = [
+        {"id": l.id, "name": l.name, "available": l.toolchain_available()}
+        for l in list_languages()
+    ]
     return {
         "llm_key_present": bool(_api_key()),
         "llm_mock": _mock_enabled(),
@@ -594,6 +530,7 @@ def api_status() -> Dict[str, Any]:
         "heal_attempts": HEAL_ATTEMPTS,
         "run_enabled": RUN_ENABLED,
         "run_timeout_s": RUN_TIMEOUT_S,
+        "languages": languages_info,
     }
 
 
@@ -667,6 +604,11 @@ POST_ROUTES = {
     "/api/cpp/compile": api_cpp_compile,
     "/api/cpp/run": api_cpp_run,
     "/api/cpp/ast": api_cpp_ast,
+    "/api/analyze": api_cpp_analyze,
+    "/api/heal": api_cpp_heal,
+    "/api/compile": api_cpp_compile,
+    "/api/run": api_cpp_run,
+    "/api/ast": api_cpp_ast,
 }
 GET_ROUTES = {
     "/api/status": api_status,
