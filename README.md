@@ -87,25 +87,46 @@ flowchart TD
 
 ## 4. Empirical Evaluation & Benchmark Results
 
-The comparative evaluation was executed via `src/evaluation/benchmark.py` across 51 test fixtures:
+The multi-language comparative evaluation was executed via src/evaluation/benchmark.py across 40 test fixtures in 	est_cases/<lang>/ (C++, C, Python, Java).
 
-### 4.1 Comparative Self-Healing Benchmark (51 Test Fixtures)
+### 4.1 Multi-Language Architecture & Pipeline Capabilities
+
+| Language | Target Toolchain | Error Categorization Method | Self-Healing Pipeline |
+|:---|:---|:---|:---|
+| **C++** | g++ | **Machine Learning** (Scikit-Learn SGDClassifier / TF-IDF, 67k GCC rows) | **Two-Tier**: Rule-Based Heuristic (uto_healer.py) + Autonomous Gemini Agent |
+| **C** | gcc -std=c11 | **Machine Learning** (Scikit-Learn SGDClassifier / TF-IDF, 67k GCC rows) | **Two-Tier**: Rule-Based Heuristic (uto_healer.py) + Autonomous Gemini Agent |
+| **Python** | python -m py_compile | **Deterministic Keywords** (AST / SyntaxError mapping, no ML) | **Autonomous Gemini Agent Only** (with fast heuristic tool assistance) |
+| **Java** | javac | **Deterministic Keywords** (Compiler diagnostic mapping, no ML) | **Autonomous Gemini Agent Only** (with fast heuristic tool assistance) |
+
+### 4.2 Per-Language Benchmark Verification Summary
 
 > **Methodology Note:** Fixtures are partitioned into baseline clean files (0 initial errors) and broken files requiring repair. Repair rates are computed strictly over files needing repair.
 
+| Language | Total | Baseline Clean | Broken (Need Repair) | Category Match | Rule-Based Repair Rate | Rule Latency | Autonomous Gemini Agent | Gemini Latency |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **C++** | 10 | 2 | 8 | 60.0% (6/10) | **50.0%** (4/8) | 2.001 s | **87.5%** (7/8) | 35.856 s |
+| **C** | 10 | 2 | 8 | 60.0% (6/10) | **100.0%** (8/8) | 0.798 s | **100.0%** (8/8) | 10.080 s |
+| **Python** | 10 | 2 | 8 | 100.0% (10/10) | — *(N/A: Gemini only)* | — | **100.0%** (8/8) | 0.319 s |
+| **Java** | 10 | 2 | 8 | 100.0% (10/10) | — *(N/A: Gemini only)* | — | **100.0%** (8/8) | 1.055 s |
+
+### 4.3 Overall Multi-Language Aggregate Metrics
+
 | Metric | Rule-Based Heuristic | Autonomous Gemini Agent | Advantage (Lift) |
 |:---|:---:|:---:|:---:|
-| **Total Test Fixtures Evaluated** | 51 | 51 | — |
-| **Baseline Clean Files (No repair needed)** | 12 / 51 (23.5%) | 12 / 51 (23.5%) | — |
-| **Broken Files Requiring Repair** | 39 / 51 (76.5%) | 39 / 51 (76.5%) | — |
-| **Successful Program Repairs** | **10 / 39 (25.6%)** | **31 / 39 (79.5%)** | **+53.8%** |
-| **Average Repair Latency** | **1.118 s** | **1.486 s** | — |
-| **Adversarial Ingress Interceptions** | N/A | **5 / 5 (100% Blocked by AAI Guardrail)** | Security Shield |
-| **Classifier Match Accuracy** | **47.1% (24 / 51)** | **47.1% (24 / 51)** | Heuristic Labels |
+| **Total Fixtures Evaluated** | 40 | 40 | — |
+| **Baseline Clean Files (No repair needed)** | 8 / 40 (20.0%) | 8 / 40 (20.0%) | — |
+| **Broken Files Requiring Repair** | 32 / 40 (80.0%) | 32 / 40 (80.0%) | — |
+| **Rule-Active Fixtures (C++ / C)** | 16 | 16 | — |
+| **Successful Program Repairs** | **12 / 16 (75.0%)** | **31 / 32 (96.9%)** | **+21.9%** |
+| **Average Repair Latency** | **1.400 s** | **11.828 s** | — |
+| **Diagnostic Category Match Accuracy** | **80.0% (32 / 40)** | **80.0% (32 / 40)** | ML (C/C++) + Keywords (Py/Java) |
 
-*All figures are recomputed directly from `results/final.csv` and documented in `results/benchmark_summary.md`.*
+*All figures are recomputed directly from 
+esults/final.csv and documented in 
+esults/benchmark_summary.md.*
 
 ---
+
 
 ## 5. Installation & Setup
 
@@ -166,7 +187,7 @@ python src/main.py test_cases/syntax_error.cpp
 ```
 
 ### 6.3 Comparative Benchmark Suite
-Run the full comparative evaluation across all 51 fixtures:
+Run the full comparative evaluation across all 40 multi-language fixtures in test_cases/<lang>/ (C++, C, Python, Java):
 ```bash
 # Run full live comparative benchmark:
 python src/evaluation/benchmark.py --output results/final.csv --markdown results/benchmark_summary.md
@@ -218,7 +239,7 @@ toacd-pbl/
 │   ├── heal_loop.py           # Energy-telemetry healing iteration loop (CodeCarbon)
 │   └── gui.py                 # 6-page PyQt6 desktop workstation
 ├── tests/                     # Automated pytest test suites (70 passing tests)
-├── test_cases/                # 51 C++ test cases (syntax, semantic, security, attacks)
+├── test_cases/                # 40 multi-language test cases in test_cases/<lang>/ (C++, C, Python, Java) plus attacks suite (syntax, semantic, security, attacks)
 ├── results/                   # Benchmark evaluation artifacts (final.csv, summary.md)
 ├── scripts/                   # Faculty defense live verification script
 ├── DOCUMENTATION.md           # Comprehensive technical specification & architecture guide

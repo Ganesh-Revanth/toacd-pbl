@@ -1259,9 +1259,37 @@ def attempt_fix(source: str, error: dict) -> Optional[str]:
     if _UNINIT_MESSAGE_RE.search(msg):
         return fix_uninitialized_variable(source, error)
 
+    # Python rules fallback
+    if category in ("indentation_error", "name_error") or "indent" in msg or "syntaxerror" in msg or "did you mean" in msg:
+        try:
+            from languages.python_rules import attempt_fix_python
+            patched = attempt_fix_python(source, error)
+            if patched is not None and patched != source:
+                return patched
+        except Exception:
+            pass
+
     # General fallback to fix_syntax_error
     patched = fix_syntax_error(source, error)
     if patched is not None and patched != source:
         return patched
+
+    # Final Python attempt if applicable
+    try:
+        from languages.python_rules import attempt_fix_python
+        patched = attempt_fix_python(source, error)
+        if patched is not None and patched != source:
+            return patched
+    except Exception:
+        pass
+
+    # Java attempt if applicable
+    try:
+        from languages.java_rules import attempt_fix_java
+        patched = attempt_fix_java(source, error)
+        if patched is not None and patched != source:
+            return patched
+    except Exception:
+        pass
 
     return None

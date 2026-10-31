@@ -91,26 +91,129 @@ function saveProposals() {
   store.set('nextId', state.nextId);
 }
 
+/* ── Code highlighter keywords ────────────────────────────────────────── */
+const KEYWORDS = {
+  cpp: new Set([
+    'alignas', 'alignof', 'and', 'and_eq', 'asm', 'auto', 'bitand', 'bitor',
+    'bool', 'break', 'case', 'catch', 'char', 'char8_t', 'char16_t', 'char32_t',
+    'class', 'compl', 'concept', 'const', 'consteval', 'constexpr', 'constinit',
+    'const_cast', 'continue', 'co_await', 'co_return', 'co_yield', 'decltype',
+    'default', 'delete', 'do', 'double', 'dynamic_cast', 'else', 'enum',
+    'explicit', 'export', 'extern', 'false', 'float', 'for', 'friend', 'goto',
+    'if', 'inline', 'int', 'long', 'mutable', 'namespace', 'new', 'noexcept',
+    'not', 'not_eq', 'nullptr', 'operator', 'or', 'or_eq', 'private', 'protected',
+    'public', 'register', 'reinterpret_cast', 'requires', 'return', 'short',
+    'signed', 'sizeof', 'static', 'static_assert', 'static_cast', 'struct',
+    'switch', 'template', 'this', 'thread_local', 'throw', 'true', 'try',
+    'typedef', 'typeid', 'typename', 'union', 'unsigned', 'using', 'virtual',
+    'void', 'volatile', 'wchar_t', 'while', 'xor', 'xor_eq', 'override', 'final'
+  ]),
+  c: new Set([
+    'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do',
+    'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline',
+    'int', 'long', 'register', 'restrict', 'return', 'short', 'signed', 'sizeof',
+    'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void',
+    'volatile', 'while', '_Alignas', '_Alignof', '_Atomic', '_Bool', '_Complex',
+    '_Generic', '_Imaginary', '_Noreturn', '_Static_assert', '_Thread_local', 'NULL'
+  ]),
+  python: new Set([
+    'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue',
+    'def', 'del', 'elif', 'else', 'except', 'False', 'finally', 'for', 'from',
+    'global', 'if', 'import', 'in', 'is', 'lambda', 'None', 'nonlocal', 'not',
+    'or', 'pass', 'raise', 'return', 'True', 'try', 'while', 'with', 'yield',
+    'match', 'case'
+  ]),
+  java: new Set([
+    'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char',
+    'class', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum',
+    'extends', 'final', 'finally', 'float', 'for', 'goto', 'if', 'implements',
+    'import', 'instanceof', 'int', 'interface', 'long', 'native', 'new',
+    'package', 'private', 'protected', 'public', 'return', 'short', 'static',
+    'strictfp', 'super', 'switch', 'synchronized', 'this', 'throw', 'throws',
+    'transient', 'try', 'void', 'volatile', 'while', 'record', 'yield', 'var',
+    'permits', 'sealed', 'non-sealed', 'true', 'false', 'null'
+  ])
+};
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function highlightCode(code, lang) {
+  if (!code) return '';
+  const kw = KEYWORDS[lang] || KEYWORDS.cpp;
+  let re;
+  if (lang === 'python') {
+    re = /("""[\s\S]*?"""|'''[\s\S]*?'''|#[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|@[a-zA-Z_]\w*|\b0x[0-9a-fA-F]+\b|\b\d+(?:\.\d+)?\b|\b[a-zA-Z_]\w*\b)/g;
+  } else if (lang === 'java') {
+    re = /(\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|@[a-zA-Z_]\w*|\b0x[0-9a-fA-F]+\b|\b\d+(?:\.\d+)?\b|\b[a-zA-Z_]\w*\b)/g;
+  } else {
+    re = /(\/\*[\s\S]*?\*\/|\/\/[^\n]*|^\s*#[a-zA-Z_]\w*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b0x[0-9a-fA-F]+\b|\b\d+(?:\.\d+)?\b|\b[a-zA-Z_]\w*\b)/gm;
+  }
+
+  let lastIndex = 0;
+  let out = '';
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    if (m.index > lastIndex) {
+      out += escapeHtml(code.slice(lastIndex, m.index));
+    }
+    const token = m[0];
+    lastIndex = re.lastIndex;
+
+    if (token.startsWith('//') || token.startsWith('/*')) {
+      out += '<span class="hl-com">' + escapeHtml(token) + '</span>';
+    } else if (lang === 'python' && token.startsWith('#')) {
+      out += '<span class="hl-com">' + escapeHtml(token) + '</span>';
+    } else if (token.startsWith('"') || token.startsWith("'")) {
+      out += '<span class="hl-str">' + escapeHtml(token) + '</span>';
+    } else if (token.startsWith('@') || token.trim().startsWith('#')) {
+      out += '<span class="hl-pre">' + escapeHtml(token) + '</span>';
+    } else if (/^\d/.test(token)) {
+      out += '<span class="hl-num">' + escapeHtml(token) + '</span>';
+    } else if (kw.has(token)) {
+      out += '<span class="hl-kw">' + escapeHtml(token) + '</span>';
+    } else {
+      out += escapeHtml(token);
+    }
+  }
+  if (lastIndex < code.length) {
+    out += escapeHtml(code.slice(lastIndex));
+  }
+  return out;
+}
+
 /* ── Code editor ─────────────────────────────────────────────────────── */
-function Editor({ value = '', label, onChange, onRun, onCursor }) {
+function Editor({ value = '', label, language = 'cpp', onChange, onRun, onCursor }) {
   const gutter = el('div', { class: 'gutter', 'aria-hidden': 'true' });
+  const highlightPre = el('pre', { class: 'highlight-layer', 'aria-hidden': 'true' });
   const ta = el('textarea', {
     class: 'code-area', spellcheck: 'false', wrap: 'off', autocapitalize: 'off',
     autocomplete: 'off', autocorrect: 'off', 'aria-label': label,
   });
   ta.value = value;
-  const root = el('div', { class: 'editor' }, gutter, ta);
+  const codeWrap = el('div', { class: 'code-wrap' }, highlightPre, ta);
+  const root = el('div', { class: 'editor' }, gutter, codeWrap);
   let marks = {};
   let tabEscape = false;
+  let currentLang = language || 'cpp';
 
   function paint() {
-    const n = ta.value.split('\n').length;
+    const text = ta.value;
+    const n = text.split('\n').length;
     gutter.replaceChildren();
     for (let i = 1; i <= n; i++) gutter.append(el('span', { class: marks[i] || '', text: String(i) }));
     gutter.scrollTop = ta.scrollTop;
+    highlightPre.innerHTML = highlightCode(text, currentLang) + '\n';
+    highlightPre.scrollTop = ta.scrollTop;
+    highlightPre.scrollLeft = ta.scrollLeft;
   }
   ta.addEventListener('input', () => { paint(); onChange && onChange(ta.value); });
-  ta.addEventListener('scroll', () => { gutter.scrollTop = ta.scrollTop; });
+  ta.addEventListener('scroll', () => {
+    gutter.scrollTop = ta.scrollTop;
+    highlightPre.scrollTop = ta.scrollTop;
+    highlightPre.scrollLeft = ta.scrollLeft;
+  });
   ta.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); onRun && onRun(e); return; }
     if (e.key === 'Escape') { tabEscape = true; return; }
@@ -135,6 +238,7 @@ function Editor({ value = '', label, onChange, onRun, onCursor }) {
     focus: () => ta.focus(),
     get: () => ta.value,
     set(v) { ta.value = v; paint(); onChange && onChange(v); },
+    setLanguage(lang) { currentLang = lang || 'cpp'; paint(); },
     mark(map) { marks = map || {}; paint(); },
     goto(line) {
       const lines = ta.value.split('\n');
@@ -214,14 +318,28 @@ const pct = (v) => (v == null ? '—' : v.toFixed(1) + '%');
 function timeLabel(ts) { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 
 function SamplePicker(language, onPick) {
-  const sel = el('select', { 'aria-label': 'Load an example' },
-    el('option', { value: '', text: 'Load an example…' }),
-    state.samples.filter(s => s.language === language).map((s, i) => el('option', { value: String(i), text: s.name })));
+  let currentLang = language || 'cpp';
+  const sel = el('select', { 'aria-label': 'Load an example', class: 'sample-picker' });
+
+  function renderOptions(lang) {
+    if (lang) currentLang = lang;
+    const filtered = (state.samples || []).filter(s => s.language === currentLang);
+    sel.replaceChildren(
+      el('option', { value: '', text: 'Load an example…' }),
+      filtered.map((s, i) => el('option', { value: String(i), text: s.name }))
+    );
+  }
+  renderOptions(currentLang);
+
   sel.addEventListener('change', () => {
     if (sel.value === '') return;
-    onPick(state.samples.filter(s => s.language === language)[Number(sel.value)]);
+    const filtered = (state.samples || []).filter(s => s.language === currentLang);
+    const smp = filtered[Number(sel.value)];
+    if (smp) onPick(smp);
     sel.value = '';
   });
+
+  sel.setLanguage = renderOptions;
   return sel;
 }
 

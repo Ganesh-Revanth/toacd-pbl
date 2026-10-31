@@ -419,11 +419,11 @@ class LLMClient:
         if code_match:
             candidate = code_match.group(1).strip()
         else:
-            fenced = re.search(r"```(?:cpp|c\+\+)?\s*(.*?)\s*```", response, re.DOTALL)
+            fenced = re.search(r"```(?:cpp|c\+\+|c|python|py|java)?\s*(.*?)\s*```", response, re.DOTALL)
             candidate = fenced.group(1).strip() if fenced else response.strip()
 
         if candidate.startswith("```"):
-            candidate = re.sub(r"^```[a-zA-Z]*\n?", "", candidate)
+            candidate = re.sub(r"^```[a-zA-Z0-9_\-\+\.]*\n?", "", candidate)
         if candidate.endswith("```"):
             candidate = re.sub(r"\n?```$", "", candidate)
         return candidate
@@ -433,6 +433,7 @@ class LLMClient:
         messages: List[Dict[str, str]],
         original_code: str = "",
         temperature: float = 0.1,
+        language: Optional[Any] = None,
     ) -> str:
         """
         Execute an LLM generation call strictly routed through:
@@ -456,7 +457,7 @@ class LLMClient:
             if cached_resp is not None:
                 # Still verify cached response through Egress Guardrail for defense-in-depth
                 candidate_code = self._extract_candidate_code(cached_resp)
-                egress_result = self.guardrail.scan_egress(original_code, candidate_code)
+                egress_result = self.guardrail.scan_egress(original_code, candidate_code, language=language)
                 if egress_result.attack_detected:
                     raise GuardrailSecurityException(egress_result, stage="EGRESS")
                 return cached_resp
@@ -485,7 +486,7 @@ class LLMClient:
 
         # ── 4. Egress Guardrail Verification ──────────────────────────────────
         candidate_code = self._extract_candidate_code(response_text)
-        egress_result = self.guardrail.scan_egress(original_code, candidate_code)
+        egress_result = self.guardrail.scan_egress(original_code, candidate_code, language=language)
         if egress_result.attack_detected:
             raise GuardrailSecurityException(egress_result, stage="EGRESS")
 

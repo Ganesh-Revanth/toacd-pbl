@@ -13,7 +13,7 @@ function updateNavCount() {
 function createProposal(r) {
   const p = {
     id: state.nextId++, time: Date.now(), mode: r.mode,
-    kind: r.mode === 'ai' ? 'C++ heal · Gemini agent' : 'C++ heal · rule-based',
+    kind: (state.cpp.language || 'cpp').toUpperCase() + ' heal · ' + (r.mode === 'ai' ? 'Gemini agent' : 'rule-based'),
     original: r.original, patched: r.patched, diff: r.diff, steps: r.steps || [],
     compiles: r.compiles, summary: r.summary || '', status: 'pending',
   };
@@ -55,14 +55,36 @@ function StepsList(steps) {
   }));
 }
 
-/* ── C++ Workspace ───────────────────────────────────────────────────── */
-const INPUT_RE = /\bcin\b|\bgetline\s*\(|\bscanf\s*\(|\bgets\s*\(|\bgetchar\s*\(/;
-const CPP_ACCEPT = '.cpp,.cc,.cxx,.c++,.c,.h,.hpp,.hh,.txt';
-const fileSlug = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') + '.cpp';
+/* ── Code Studio Workspace ────────────────────────────────────────────── */
+const INPUT_RE = /\bcin\b|\bgetline\s*\(|\bscanf\s*\(|\bgets\s*\(|\bgetchar\s*\(|\binput\s*\(|\bScanner\b/;
+const SUPPORTED_LANGUAGES = [
+  { id: 'cpp', name: 'C++', ext: '.cpp', defaultFile: 'main.cpp', toolchain: 'g++' },
+  { id: 'c', name: 'C', ext: '.c', defaultFile: 'main.c', toolchain: 'gcc' },
+  { id: 'python', name: 'Python', ext: '.py', defaultFile: 'main.py', toolchain: 'python' },
+  { id: 'java', name: 'Java', ext: '.java', defaultFile: 'Main.java', toolchain: 'javac' },
+];
+const DEFAULT_FILENAMES = { cpp: 'main.cpp', c: 'main.c', python: 'main.py', java: 'Main.java' };
+const CODE_ACCEPT = '.cpp,.cc,.cxx,.c++,.c,.h,.hpp,.hh,.py,.pyw,.java,.txt';
+
+function detectLanguageFromFilename(filename) {
+  if (!filename) return null;
+  const ext = '.' + filename.split('.').pop().toLowerCase();
+  if (['.cpp', '.cc', '.cxx', '.c++', '.hpp', '.hh'].includes(ext)) return 'cpp';
+  if (['.c', '.h'].includes(ext)) return 'c';
+  if (['.py', '.pyw'].includes(ext)) return 'python';
+  if (['.java'].includes(ext)) return 'java';
+  return null;
+}
+
+function fileSlug(name, lang = 'cpp') {
+  const ext = DEFAULT_FILENAMES[lang] ? '.' + DEFAULT_FILENAMES[lang].split('.').pop() : '.cpp';
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') + ext;
+}
 
 function pageWorkspace(root) {
   const s = state.cpp;
-  s.filename = s.filename || 'main.cpp';
+  s.language = s.language || 'cpp';
+  s.filename = s.filename || DEFAULT_FILENAMES[s.language] || 'main.cpp';
   s.stdin = s.stdin || '';
   s.tab = s.tab || 'output';
   if (s.baseline === undefined) s.baseline = s.code;
@@ -76,8 +98,16 @@ function pageWorkspace(root) {
   const cursorInfo = el('span', { text: 'Ln 1, Col 1' });
   const staleChip = el('span', { class: 'chip warn', hidden: true }, el('i'), 'Edited since last build');
   const ed = Editor({
-    value: s.code, label: 'C++ source code',
-    onChange: (v) => { s.code = v; updateStale(); updateInputHint(); },
+    value: s.code, label: (s.language || 'Code') + ' source code', language: s.language,
+    onChange: (v) => {
+      s.code = v;
+      try {
+        localStorage.setItem('studio:draft:' + s.language, JSON.stringify({
+          code: v, filename: s.filename
+        }));
+      } catch (e) {}
+      updateStale(); updateInputHint();
+    },
     onRun: (e) => (e && e.shiftKey) ? runJob('compile') : runJob('run'),
     onCursor: (ln, col) => { cursorInfo.textContent = 'Ln ' + ln + ', Col ' + col; },
   });
@@ -85,7 +115,7 @@ function pageWorkspace(root) {
 
   /* ── toolbar ── */
   const fileName = el('span', { class: 'file-name', text: s.filename });
-  const btnCompile = el('button', { class: 'btn', title: 'Check the code with g++ (Ctrl+Shift+Enter)', onClick: () => runJob('compile') }, 'Compile');
+  const btnCompile = el('button', { class: 'btn', title: 'Check code with toolchain (Ctrl+Shift+Enter)', onClick: () => runJob('compile') }, 'Compile');
   const btnRun = el('button', { class: 'btn primary run', title: 'Compile, then run the program (Ctrl+Enter)', onClick: () => runJob('run') },
     icon('play'), 'Compile & Run');
   const itemRules = el('button', { class: 'menu-item', role: 'menuitem', onClick: (e) => { closeMenu(e); heal('rules'); } },
@@ -100,7 +130,98 @@ function pageWorkspace(root) {
 
   function setFile(name) { s.filename = name; fileName.textContent = name; }
 
+  const langSelector = el('select', {
+    class: 'lang-selector',
+    'aria-label': 'Select programming language',
+    title: 'Programming language',
+    onChange: (e) => switchLanguage(e.target.value)
+  },
+    SUPPORTED_LANGUAGES.map(lang => {
+      const info = (state.status?.languages || []).find(l => l.id === lang.id);
+      const available = info ? info.available : true;
+      const opt = el('option', {
+        value: lang.id,
+        text: lang.name + (!available ? ' (unavailable)' : '')
+      });
+      if (!available) {
+        opt.disabled = true;
+        opt.title = `${lang.toolchain} is missing from PATH`;
+      }
+      if (lang.id === s.language) opt.selected = true;
+      return opt;
+    })
+  );
+
+  async function switchLanguage(newLang, opts = {}) {
+    const oldLang = s.language || 'cpp';
+    if (newLang === oldLang && !opts.force) return;
+
+    // 1. Save old draft
+    try {
+      localStorage.setItem('studio:draft:' + oldLang, JSON.stringify({
+        code: s.code, filename: s.filename || DEFAULT_FILENAMES[oldLang]
+      }));
+    } catch (e) {}
+
+    // 2. Set new language
+    s.language = newLang;
+    store.set('studio:lang', newLang);
+    langSelector.value = newLang;
+    ed.setLanguage(newLang);
+
+    // 3. Load examples for new language
+    try {
+      const data = await call('/api/samples?language=' + newLang);
+      if (data && data.samples) {
+        state.samples = data.samples;
+        picker.setLanguage(newLang);
+      }
+    } catch (e) {
+      console.warn('Failed to load examples for ' + newLang, e);
+    }
+
+    // 4. Decide code to display
+    if (opts.newCode !== undefined) {
+      s.code = opts.newCode;
+      s.filename = opts.newFilename || DEFAULT_FILENAMES[newLang];
+    } else {
+      let draft = null;
+      try {
+        const saved = localStorage.getItem('studio:draft:' + newLang);
+        if (saved) draft = JSON.parse(saved);
+      } catch (e) {}
+
+      if (draft && typeof draft.code === 'string' && draft.code.trim()) {
+        s.code = draft.code;
+        s.filename = draft.filename || DEFAULT_FILENAMES[newLang];
+      } else {
+        const first = (state.samples || []).find(x => x.language === newLang);
+        if (first) {
+          s.code = first.code;
+          s.filename = first.filename || DEFAULT_FILENAMES[newLang];
+        } else {
+          s.code = '';
+          s.filename = DEFAULT_FILENAMES[newLang];
+        }
+      }
+    }
+
+    // 5. Update editor & view
+    ed.set(s.code);
+    setFile(s.filename);
+    s.baseline = s.code;
+    s.result = null; s.run = null; s.pending = null; s.lastCheckedCode = null;
+    s.tab = 'output'; flash = null; healNote = null; lastDecisionNote = null;
+    ed.mark({}); renderResults(); updateStale(); updateInputHint();
+    announce('Switched to ' + (SUPPORTED_LANGUAGES.find(l => l.id === newLang)?.name || newLang));
+  }
+
   function loadCode(text, name) {
+    const detected = detectLanguageFromFilename(name);
+    if (detected && detected !== s.language) {
+      switchLanguage(detected, { newCode: text, newFilename: name });
+      return;
+    }
     if (s.code.trim() && s.code !== s.baseline && s.code !== text &&
         !window.confirm('Replace the code in the editor? Your unsaved changes will be lost.')) return;
     ed.set(text); setFile(name || s.filename); s.baseline = text;
@@ -110,10 +231,11 @@ function pageWorkspace(root) {
   }
   const onFileError = (msg) => { flash = notice('bad', msg); s.tab = 'output'; renderResults(); announce(msg); };
 
-  const loader = FileLoader({ accept: CPP_ACCEPT, label: 'Open file', onLoad: (t, n) => loadCode(t, n), onError: onFileError });
-  const picker = SamplePicker('cpp', (smp) => loadCode(smp.code, fileSlug(smp.name)));
+  const loader = FileLoader({ accept: CODE_ACCEPT, label: 'Open file', onLoad: (t, n) => loadCode(t, n), onError: onFileError });
+  const picker = SamplePicker(s.language || 'cpp', (smp) => loadCode(smp.code, smp.filename || fileSlug(smp.name, s.language)));
   const btnSave = el('button', { class: 'btn', title: 'Download the code as a file', onClick: () => {
-    const name = /\.[A-Za-z0-9+]+$/.test(s.filename) ? s.filename : s.filename + '.cpp';
+    const ext = SUPPORTED_LANGUAGES.find(l => l.id === s.language)?.ext || '.cpp';
+    const name = /\.[A-Za-z0-9+]+$/.test(s.filename) ? s.filename : s.filename + ext;
     downloadText(name, ed.get()); s.baseline = ed.get(); announce('Saved ' + name);
   } }, icon('save'), 'Save');
 
@@ -182,13 +304,16 @@ function pageWorkspace(root) {
   }
 
   function consoleView(run) {
-    const hasOut = run.stdout.length > 0, hasErr = run.stderr.length > 0;
+    if (!run) return el('div', { class: 'empty' }, el('b', { text: 'No program output' }));
+    const outStr = typeof run.stdout === 'string' ? run.stdout : '';
+    const errStr = typeof run.stderr === 'string' ? run.stderr : '';
+    const hasOut = outStr.length > 0, hasErr = errStr.length > 0;
     let chip;
-    if (run.timed_out) chip = el('span', { class: 'chip bad' }, el('i'), 'Stopped after ' + run.timeout_s + ' s');
+    if (run.timed_out) chip = el('span', { class: 'chip bad' }, el('i'), 'Stopped after ' + (run.timeout_s || 5) + ' s');
     else if (run.output_flood) chip = el('span', { class: 'chip bad' }, el('i'), 'Stopped: too much output');
     else if (run.signal) chip = el('span', { class: 'chip bad' }, el('i'), 'Crashed · ' + run.signal);
     else if (run.exit_code === 0) chip = el('span', { class: 'chip ok' }, el('i'), 'Exited with code 0');
-    else chip = el('span', { class: 'chip warn' }, el('i'), 'Exited with code ' + run.exit_code);
+    else chip = el('span', { class: 'chip warn' }, el('i'), 'Exited with code ' + (run.exit_code != null ? run.exit_code : 1));
     const warns = s.result && s.result.warning_count;
     const notes = [];
     if (run.timed_out) notes.push(notice('warn', el('b', { text: 'Your program did not finish. ' }),
@@ -197,14 +322,15 @@ function pageWorkspace(root) {
         : 'It may contain an infinite loop, or be waiting for input.'));
     if (run.signal_hint) notes.push(notice('bad', run.signal_hint));
     if (run.truncated) notes.push(notice('warn', 'Output was cut at 64 KB.'));
+    const timeText = run.elapsed_ms != null ? run.elapsed_ms + ' ms' : (run.elapsed_s != null ? Math.round(run.elapsed_s * 1000) + ' ms' : '');
     return el('div', { class: 'stack-sm' },
-      el('div', { class: 'run-meta' }, chip, el('span', { class: 'faint', text: run.elapsed_ms + ' ms' }),
+      el('div', { class: 'run-meta' }, chip, timeText ? el('span', { class: 'faint', text: timeText }) : null,
         warns ? el('button', { class: 'linkish', text: plural(warns, 'warning'), onClick: () => { s.tab = 'problems'; renderResults(); } }) : null),
       el('div', { class: 'console', role: 'log', tabindex: '0', 'aria-label': 'Program output' },
         hasOut && hasErr ? el('div', { class: 'c-label', text: 'stdout' }) : null,
-        hasOut ? el('pre', { class: 'c-out', text: run.stdout }) : null,
+        hasOut ? el('pre', { class: 'c-out', text: outStr }) : null,
         hasErr ? el('div', { class: 'c-label', text: 'stderr' }) : null,
-        hasErr ? el('pre', { class: 'c-err', text: run.stderr }) : null,
+        hasErr ? el('pre', { class: 'c-err', text: errStr }) : null,
         !hasOut && !hasErr ? el('span', { class: 'c-dim', text: '(the program printed nothing)' }) : null),
       notes);
   }
@@ -219,7 +345,7 @@ function pageWorkspace(root) {
         'Press ', el('b', { text: 'Compile & Run' }), ' to build and run your program, or ', el('b', { text: 'Compile' }),
         ' to only check it. Output appears here.'));
     } else if (!r.ok) {
-      parts.push(notice('bad', el('b', { text: 'Build failed. ' }), plural(r.error_count, 'error') + ' to fix before the program can run. '),
+      parts.push(notice('bad', el('b', { text: 'Build failed. ' }), plural(r.error_count || 0, 'error') + ' to fix before the program can run. '),
         el('p', { style: 'margin-top:12px' }, el('button', { class: 'btn', onClick: () => { s.tab = 'problems'; renderResults(); } }, 'See problems')));
     } else if (!s.run) {
       parts.push(notice('ok', el('b', { text: 'Compiled successfully' }), r.warning_count ? ' with ' + plural(r.warning_count, 'warning') + '.' : '. No errors or warnings.'),
@@ -235,15 +361,17 @@ function pageWorkspace(root) {
     const r = s.result;
     if (!r) return el('div', { class: 'empty' }, el('b', { text: 'No problems to show' }), 'Compile your code and any errors or warnings are listed here, explained in plain language.');
     const head = el('div', { class: 'prob-head' },
-      el('h2', { text: r.ok ? (r.warning_count ? 'Compiles, with warnings' : 'No problems found') : plural(r.error_count, 'error') + (r.warning_count ? ', ' + plural(r.warning_count, 'warning') : '') }),
-      el('span', { class: 'faint', text: r.elapsed_s + ' s' }));
+      el('h2', { text: r.ok ? (r.warning_count ? 'Compiles, with warnings' : 'No problems found') : plural(r.error_count || 0, 'error') + (r.warning_count ? ', ' + plural(r.warning_count, 'warning') : '') }),
+      el('span', { class: 'faint', text: (r.elapsed_s != null ? r.elapsed_s + ' s' : '') }));
     const list = el('div', { class: 'prob-list' });
-    if (!r.diagnostics.length) list.append(el('div', { class: 'empty' }, el('b', { text: 'No diagnostics' }), 'g++ reported nothing for this file.'));
-    r.diagnostics.forEach(d => list.append(Diagnostic(d, ed)));
+    const diags = r.diagnostics || [];
+    if (!diags.length) list.append(el('div', { class: 'empty' }, el('b', { text: 'No diagnostics' }), 'No problems reported for this file.'));
+    diags.forEach(d => list.append(Diagnostic(d, ed)));
     const secs = el('div');
-    if (r.security.length) {
-      secs.append(el('div', { class: 'section-title', text: 'Security findings · ' + r.security.length }));
-      r.security.forEach(f => secs.append(SecurityItem(f, ed)));
+    const secList = r.security || [];
+    if (secList.length) {
+      secs.append(el('div', { class: 'section-title', text: 'Security findings · ' + secList.length }));
+      secList.forEach(f => secs.append(SecurityItem(f, ed)));
     }
     return el('div', null, head, list, secs);
   }
@@ -295,14 +423,17 @@ function pageWorkspace(root) {
     await busy(kind === 'run' ? allButtons() : [btnCompile, btnRun, itemRules, itemAI], async () => {
       try {
         if (kind === 'run') {
-          const d = await call('/api/cpp/run', { code, stdin: s.stdin });
-          s.result = d.analysis; s.run = d.run;
+          const d = await call('/api/cpp/run', { code, stdin: s.stdin, language: s.language });
+          s.result = d.analysis || d;
+          s.run = d.run || (d.ran ? d : null);
         } else {
-          s.result = await call('/api/cpp/analyze', { code }); s.run = null;
+          s.result = await call('/api/cpp/analyze', { code, language: s.language });
+          s.run = null;
         }
+        if (!s.result) s.result = { ok: false, error_count: 0, warning_count: 0, diagnostics: [] };
         s.lastCheckedCode = code; markEditor(s.result);
         s.tab = s.result.ok ? 'output' : 'problems';
-        announce(s.result.ok ? (kind === 'run' ? 'Program finished' : 'Compiled successfully') : plural(s.result.error_count, 'error') + ' found');
+        announce(s.result.ok ? (kind === 'run' ? 'Program finished' : 'Compiled successfully') : plural(s.result.error_count || 0, 'error') + ' found');
       } catch (e) { s.result = null; s.run = null; flash = notice('bad', e.message); s.tab = 'output'; }
       finally { working = null; }
     });
@@ -316,14 +447,14 @@ function pageWorkspace(root) {
     working = 'heal'; s.tab = 'fix'; renderResults();
     await busy(allButtons(), async () => {
       try {
-        const r = await call('/api/cpp/heal', { mode, code });
+        const r = await call('/api/cpp/heal', { mode, code, language: s.language });
         if (!r.changed) {
           s.pending = null;
           healNote = el('div', null,
             notice(r.compiles ? 'ok' : 'warn', el('b', { text: 'No change proposed. ' }),
               r.compiles ? 'The code already compiles, so there is nothing to fix.' : 'No automatic fix was found for the remaining problems. Read the explanations in Problems and edit the code, or try the AI fix.'),
             el('div', { style: 'height:12px' }), StepsList(r.steps));
-          if (!r.compiles) { s.result = await call('/api/cpp/analyze', { code }); s.run = null; s.lastCheckedCode = code; markEditor(s.result); }
+          if (!r.compiles) { s.result = await call('/api/cpp/analyze', { code, language: s.language }); s.run = null; s.lastCheckedCode = code; markEditor(s.result); }
           announce('No change proposed');
         } else {
           createProposal(r); announce('A change is proposed. Review the diff.');
@@ -336,18 +467,19 @@ function pageWorkspace(root) {
 
   /* ── layout ── */
   const editorWrap = el('div', { class: 'editor-wrap' }, ed.root,
-    el('div', { class: 'drop-hint', 'aria-hidden': 'true' }, el('b', { text: 'Drop a C++ file to open it' }), el('span', { text: '.cpp  .cc  .cxx  .h  .hpp  .txt' })));
+    el('div', { class: 'drop-hint', 'aria-hidden': 'true' }, el('b', { text: 'Drop a code file to open it' }), el('span', { text: '.cpp  .c  .py  .java' })));
   enableFileDrop(editorWrap, (t, n) => loadCode(t, n), onFileError);
 
   root.append(
     el('div', { class: 'page-head compact' },
-      el('div', null, el('h1', { text: 'C++ workspace' }),
-        el('p', { text: 'Write or open a C++ file, build it with g++, run it, and get every problem explained.' })),
+      el('div', null, el('h1', { text: 'Code Studio' }),
+        el('p', { text: 'Write or open code in C++, C, Python, or Java, build it, run it, and get every problem explained.' })),
       el('div', { class: 'actions build-actions', role: 'group', 'aria-label': 'Build' }, fixMenu, btnCompile, btnRun)),
     !aiOK && el('p', { class: 'faint', style: 'margin:-12px 0 16px', text: 'AI fixes are off because no Gemini key is configured. Rule-based fixes work without one.' }),
     el('div', { class: 'ws' },
       el('section', { class: 'panel ide', 'aria-label': 'Code editor' },
         el('div', { class: 'toolbar', role: 'toolbar', 'aria-label': 'Editor actions' },
+          langSelector,
           el('span', { class: 'file-pill' }, icon('file'), fileName),
           loader, picker, btnSave),
         editorWrap, stdinBox,

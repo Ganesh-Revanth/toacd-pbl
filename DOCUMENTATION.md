@@ -170,28 +170,46 @@ A lightweight, zero-dependency local web studio implementing the C++ development
 
 ## 6. Empirical Evaluation & Benchmark Results
 
-The evaluation harness (`src/evaluation/benchmark.py`) performs comparative benchmarking across 51 C++ test fixtures in `test_cases/`.
+The evaluation harness (src/evaluation/benchmark.py) performs comparative benchmarking across 40 test fixtures in 	est_cases/<lang>/ (C++, C, Python, Java).
 
-### 6.1 Aggregate Summary Metrics
+### 6.1 Multi-Language Architecture & Pipeline Capabilities
 
-The following metrics were generated directly by executing `src/evaluation/benchmark.py`:
+| Language | Target Toolchain | Error Categorization Method | Self-Healing Pipeline |
+|:---|:---|:---|:---|
+| **C++** | g++ | **Machine Learning** (Scikit-Learn SGDClassifier / TF-IDF, 67k GCC rows) | **Two-Tier**: Rule-Based Heuristic (uto_healer.py) + Autonomous Gemini Agent |
+| **C** | gcc -std=c11 | **Machine Learning** (Scikit-Learn SGDClassifier / TF-IDF, 67k GCC rows) | **Two-Tier**: Rule-Based Heuristic (uto_healer.py) + Autonomous Gemini Agent |
+| **Python** | python -m py_compile | **Deterministic Keywords** (AST / SyntaxError mapping, no ML) | **Autonomous Gemini Agent Only** (with fast heuristic tool assistance) |
+| **Java** | javac | **Deterministic Keywords** (Compiler diagnostic mapping, no ML) | **Autonomous Gemini Agent Only** (with fast heuristic tool assistance) |
+
+### 6.2 Per-Language Benchmark Verification Summary
+
+> **Methodology Note:** Fixtures are partitioned into baseline clean files (0 initial errors) and broken files requiring repair. Repair rates are computed strictly over files needing repair.
+
+| Language | Total | Baseline Clean | Broken (Need Repair) | Category Match | Rule-Based Repair Rate | Rule Latency | Autonomous Gemini Agent | Gemini Latency |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **C++** | 10 | 2 | 8 | 60.0% (6/10) | **50.0%** (4/8) | 2.001 s | **87.5%** (7/8) | 35.856 s |
+| **C** | 10 | 2 | 8 | 60.0% (6/10) | **100.0%** (8/8) | 0.798 s | **100.0%** (8/8) | 10.080 s |
+| **Python** | 10 | 2 | 8 | 100.0% (10/10) | — *(N/A: Gemini only)* | — | **100.0%** (8/8) | 0.319 s |
+| **Java** | 10 | 2 | 8 | 100.0% (10/10) | — *(N/A: Gemini only)* | — | **100.0%** (8/8) | 1.055 s |
+
+### 6.3 Overall Multi-Language Aggregate Metrics
+
+The following metrics were generated directly by executing src/evaluation/benchmark.py:
 
 | Metric Category | Evaluated Metric | Value / Rate | Technical Assessment & Boundary |
 |:---|:---|:---|:---|
-| **Self-Healing** | Total C++ Test Fixtures | **51** | Evaluated fixtures in `test_cases/` |
-| **Self-Healing** | Baseline Clean Files | **12/51** (23.5%) | Compiled with 0 errors initially (excluded from heal rate) |
-| **Self-Healing** | Broken Files Requiring Repair | **39/51** (76.5%) | Ground-truth compilation failures requiring repair |
-| **Self-Healing** | Classifier Category Accuracy | **47.1%** (24/51) | Evaluated against heuristic metadata labels |
-| **Self-Healing** | **Rule-Based Repair Success Rate** | **25.6%** (10/39) | Simple localized regex AST fixes on broken files |
-| **Self-Healing** | Rule-Based Average Latency | **1.118 s** | Ultra-low latency static repair pass |
-| **Self-Healing** | **Autonomous Gemini Agent Success** | **79.5%** (31/39) | Multi-tier reasoning with backoff & AAI Guardrails |
-| **Self-Healing** | Gemini Agent Average Latency | **1.486 s** | Deep contextual analysis on broken files |
-| **Self-Healing** | **AI Healing Advantage (Lift)** | **+53.8%** | Empirical improvement over static rule-based heuristics |
-| **Security Guardrail** | Adversarial Ingress Interceptions | **5/5** (100% Blocked) | Intercepted in <0.05 s before model call |
-
-*All figures are recomputed directly from `results/final.csv` and documented in `results/benchmark_summary.md`.*
+| **Evaluation Suite** | Total Multi-Language Test Fixtures | **40** | Evaluated fixtures in 	est_cases/<lang>/ (C++, C, Python, Java) |
+| **Self-Healing** | Baseline Clean Files | **8/40** (20.0%) | Compiled with 0 errors initially (excluded from heal rate) |
+| **Self-Healing** | Broken Files Requiring Repair | **32/40** (80.0%) | Ground-truth compilation failures requiring repair |
+| **Classification** | Diagnostic Category Match Accuracy | **80.0%** (32/40) | ML for C++/C; keyword diagnostics for Python/Java |
+| **Self-Healing** | **Rule-Based Repair Success Rate** | **75.0%** (12/16) | Over C++/C broken files where rule healing is active |
+| **Self-Healing** | Rule-Based Average Latency | **1.400 s** | Ultra-low latency static repair pass |
+| **Self-Healing** | **Autonomous Gemini Agent Success** | **96.9%** (31/32) | Multi-tier reasoning with backoff & AAI Guardrails |
+| **Self-Healing** | Gemini Agent Average Latency | **11.828 s** | Evaluated across all 4 languages with AAI Guardrails |
+| **Self-Healing** | **AI Healing Advantage (Lift)** | **+21.9%** | Empirical improvement over static rule-based heuristics |
 
 ---
+
 
 ## 7. Installation, Execution & Verification
 

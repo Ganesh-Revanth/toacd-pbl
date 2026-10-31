@@ -227,6 +227,43 @@ class TestBenchmarkModule(unittest.TestCase):
                     rows = list(csv.DictReader(f))
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0]["suite"], "healing")
+                    self.assertIn("language", rows[0])
+                    self.assertEqual(rows[0]["language"], "cpp")
+
+    def test_run_benchmark_multi_language_csv_columns(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            for lang, ext in [("cpp", ".cpp"), ("c", ".c"), ("python", ".py"), ("java", ".java")]:
+                ldir = os.path.join(tmp_dir, lang)
+                os.makedirs(ldir, exist_ok=True)
+                with open(os.path.join(ldir, f"good_test{ext}"), "w", encoding="utf-8") as f:
+                    f.write("// clean\n")
+
+            out_csv = os.path.join(tmp_dir, "results", "final.csv")
+            with patch("evaluation.benchmark.ErrorClassifier") as MockClassifier, \
+                 patch("evaluation.benchmark.get_language") as MockGetLang:
+                mock_clf = MagicMock()
+                mock_clf.is_trained.return_value = True
+                MockClassifier.return_value = mock_clf
+
+                mock_lang = MagicMock()
+                mock_lang.check.return_value = []
+                MockGetLang.return_value = mock_lang
+
+                res = run_benchmark(
+                    test_dir=tmp_dir,
+                    output_csv=out_csv,
+                    no_llm=True,
+                    max_attempts=1,
+                )
+
+                self.assertEqual(len(res), 4)
+                with open(out_csv, "r", encoding="utf-8") as f:
+                    rows = list(csv.DictReader(f))
+                    langs = [r["language"] for r in rows]
+                    self.assertIn("cpp", langs)
+                    self.assertIn("c", langs)
+                    self.assertIn("python", langs)
+                    self.assertIn("java", langs)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 WEB_DIR = Path(__file__).resolve().parent
 SRC_DIR = WEB_DIR.parent
@@ -244,16 +244,57 @@ def api_cpp_run(body: Dict[str, Any]) -> Dict[str, Any]:
         src = os.path.join(wd, f"main{ext}")
         _classify(errors)
         enriched = _enrich(errors, src)
+        security = _security_findings(src)
         hard = sum(1 for e in enriched if e["type"] == "error")
+        warn = sum(1 for e in enriched if e["type"] == "warning")
         result: Dict[str, Any] = {
-            "ok": hard == 0, "error_count": hard,
-            "warning_count": sum(1 for e in enriched if e["type"] == "warning"),
-            "diagnostics": enriched, "raw_stderr": stderr.strip(), "ran": False,
+            "ok": hard == 0,
+            "error_count": hard,
+            "warning_count": warn,
+            "diagnostics": enriched,
+            "security": security,
+            "raw_stderr": stderr.strip(),
+            "ran": False,
         }
         if hard == 0:
-            result.update(lang.run(code, wd, stdin=stdin_text, timeout=RUN_TIMEOUT_S))
+            run_data = lang.run(code, wd, stdin=stdin_text, timeout=RUN_TIMEOUT_S)
+            result.update(run_data)
             result["ran"] = True
-    result["elapsed_s"] = round(time.time() - t0, 3)
+
+    elapsed_s = round(time.time() - t0, 3)
+    result["elapsed_s"] = elapsed_s
+
+    analysis = {
+        "ok": result["ok"],
+        "error_count": result["error_count"],
+        "warning_count": result["warning_count"],
+        "diagnostics": result["diagnostics"],
+        "security": result.get("security", []),
+        "raw_stderr": result["raw_stderr"],
+        "elapsed_s": elapsed_s,
+    }
+    result["analysis"] = analysis
+
+    if result["ran"]:
+        run_obj = {
+            "stdout": result.get("stdout", ""),
+            "stderr": result.get("stderr", ""),
+            "exit_code": result.get("exit_code", 0),
+            "timed_out": bool(result.get("timed_out")),
+            "output_flood": bool(result.get("output_flood")),
+            "truncated": bool(result.get("truncated")),
+            "signal": result.get("signal"),
+            "signal_hint": result.get("signal_hint"),
+            "timeout_s": RUN_TIMEOUT_S,
+            "elapsed_ms": int(result.get("run_s", elapsed_s) * 1000) if "run_s" in result else int(elapsed_s * 1000),
+            "elapsed_s": result.get("run_s", elapsed_s),
+        }
+        result["run"] = run_obj
+        result["elapsed_ms"] = run_obj["elapsed_ms"]
+        result["truncated"] = run_obj["truncated"]
+    else:
+        result["run"] = None
+
     return result
 
 
@@ -341,7 +382,7 @@ def api_cpp_heal(body: Dict[str, Any]) -> Dict[str, Any]:
     lang = _get_lang(body)
     mode = body.get("mode", "rules")
     if mode == "ai":
-        return _heal_ai(code)
+        return _heal_ai(code, language=lang.id)
     if mode != "rules":
         raise ApiError("mode must be 'rules' or 'ai'.")
 
@@ -364,7 +405,14 @@ def api_cpp_heal(body: Dict[str, Any]) -> Dict[str, Any]:
             target = _pick_fix_target(errors, skipped)
             if target is None:
                 break
-            patched = attempt_fix(current, target)
+            if lang.id == "python":
+                from languages.python_rules import attempt_fix_python
+                patched = attempt_fix_python(current, target)
+            elif lang.id == "java":
+                from languages.java_rules import attempt_fix_java
+                patched = attempt_fix_java(current, target)
+            else:
+                patched = attempt_fix(current, target)
             if not patched or patched == current:
                 skipped.add((target.get("line"), target.get("message")))
                 steps.append({
@@ -400,7 +448,7 @@ def api_cpp_heal(body: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _heal_ai(code: str) -> Dict[str, Any]:
+def _heal_ai(code: str, language: str = "cpp") -> Dict[str, Any]:
     _require_llm()
     try:
         from agentic_compiler import CompilerAgent
@@ -414,7 +462,7 @@ def _heal_ai(code: str) -> Dict[str, Any]:
                       "action": str(action)[:200], "fixed": None})
 
     try:
-        result = CompilerAgent().heal(code, None, on_step=on_step)
+        result = CompilerAgent(language=language).heal(code, None, on_step=on_step, language=language)
     except Exception as exc:
         raise ApiError(f"AI healing failed: {type(exc).__name__}: {exc}", 502)
 
@@ -498,15 +546,32 @@ CPP_SAMPLE_FILES = [
 ]
 
 
-def api_samples() -> Dict[str, Any]:
+def api_samples(language: str = "cpp") -> Dict[str, Any]:
+    lang_id = (language or "cpp").lower().strip()
     samples: List[Dict[str, Any]] = []
-    for rel in CPP_SAMPLE_FILES:
-        p = ROOT_DIR / "test_cases" / rel
-        if p.is_file() and p.stat().st_size < 20_000:
-            nice = p.stem.replace("_", " ")
-            samples.append({"name": nice, "language": "cpp",
-                            "code": p.read_text(encoding="utf-8", errors="replace")})
-    return {"samples": samples}
+    lang_dir = ROOT_DIR / "test_cases" / lang_id
+    if lang_dir.is_dir():
+        for p in sorted(lang_dir.iterdir()):
+            if p.is_file() and p.stat().st_size < 20_000 and not p.name.startswith("."):
+                nice = p.stem.replace("_", " ")
+                samples.append({
+                    "name": nice,
+                    "filename": p.name,
+                    "language": lang_id,
+                    "code": p.read_text(encoding="utf-8", errors="replace"),
+                })
+    if not samples and lang_id == "cpp":
+        for rel in CPP_SAMPLE_FILES:
+            p = ROOT_DIR / "test_cases" / rel
+            if p.is_file() and p.stat().st_size < 20_000:
+                nice = p.stem.replace("_", " ")
+                samples.append({
+                    "name": nice,
+                    "filename": p.name,
+                    "language": "cpp",
+                    "code": p.read_text(encoding="utf-8", errors="replace"),
+                })
+    return {"samples": samples, "language": lang_id}
 
 
 def api_status() -> Dict[str, Any]:
@@ -563,6 +628,37 @@ def api_benchmark() -> Dict[str, Any]:
     def pct(a, b):
         return round(100.0 * a / b, 1) if b else None
 
+    # Multi-language breakdown
+    by_lang: Dict[str, Any] = {}
+    for lid in ("cpp", "c", "python", "java"):
+        l_rows = [r for r in healing if r.get("language") == lid]
+        if not l_rows:
+            continue
+        l_broken = [r for r in l_rows if str(r.get("baseline_clean", "")).lower() != "true"]
+        l_rule_ok = [r for r in l_broken if r.get("rule_compiled") == "yes"]
+        l_ai_ok = [r for r in l_broken if r.get("llm_compiled") == "yes"]
+        l_ai_ran = [r for r in l_broken if r.get("llm_compiled") in ("yes", "no")]
+        l_clf_ok = [r for r in l_rows if r.get("category_matched") == "yes"]
+        has_rules = any(r.get("rule_compiled") != "n/a" for r in l_broken)
+        by_lang[lid] = {
+            "language": lid,
+            "name": {"cpp": "C++", "c": "C", "python": "Python", "java": "Java"}.get(lid, lid.upper()),
+            "total_fixtures": len(l_rows),
+            "already_clean": len(l_rows) - len(l_broken),
+            "broken": len(l_broken),
+            "classification_technique": "ML (Scikit-Learn TF-IDF)" if lid in ("cpp", "c") else "Deterministic Keywords",
+            "healing_pipeline": "Rule-Based + Gemini Agent" if lid in ("cpp", "c") else "Gemini Agent Only",
+            "has_rules": has_rules,
+            "rule_fixed": len(l_rule_ok) if has_rules else 0,
+            "rule_rate": pct(len(l_rule_ok), len(l_broken)) if has_rules else None,
+            "rule_avg_s": avg(l_broken, "rule_time_sec") if has_rules else None,
+            "ai_ran": len(l_ai_ran),
+            "ai_fixed": len(l_ai_ok),
+            "ai_rate": pct(len(l_ai_ok), len(l_ai_ran)) if l_ai_ran else None,
+            "ai_avg_s": avg(l_ai_ran, "llm_time_sec"),
+            "classifier_accuracy": pct(len(l_clf_ok), len(l_rows)),
+        }
+
     return {
         "healing": {
             "total_fixtures": len(healing),
@@ -575,8 +671,6 @@ def api_benchmark() -> Dict[str, Any]:
             "ai_fixed": len(ai_ok),
             "ai_rate": pct(len(ai_ok), len(ai_ran)) if ai_ran else None,
             "ai_avg_s": avg(ai_ran, "llm_time_sec"),
-            # AI "misses" that returned in <50 ms never reached the model: the
-            # security guardrail blocked those (attack-test) files on purpose.
             "ai_guardrail_blocked": sum(
                 1 for r in ai_ran
                 if r.get("llm_compiled") == "no" and (_num(r, "llm_time_sec") or 0) < 0.05
@@ -584,8 +678,10 @@ def api_benchmark() -> Dict[str, Any]:
             "classifier_accuracy": pct(len(clf_ok), len(healing)),
             "note": "'Fixed' means the file now compiles; it does not prove the program still behaves correctly.",
         },
+        "by_language": by_lang,
         "per_file": [
             {"file": os.path.basename(r.get("file", "")),
+             "language": r.get("language", "cpp"),
              "baseline_clean": str(r.get("baseline_clean", "")).lower() == "true",
              "rule": r.get("rule_compiled"), "ai": r.get("llm_compiled"),
              "rule_time": _num(r, "rule_time_sec"), "ai_time": _num(r, "llm_time_sec")}
@@ -609,6 +705,7 @@ POST_ROUTES = {
     "/api/compile": api_cpp_compile,
     "/api/run": api_cpp_run,
     "/api/ast": api_cpp_ast,
+    "/api/samples": lambda body: api_samples(body.get("language", body.get("lang", "cpp"))),
 }
 GET_ROUTES = {
     "/api/status": api_status,
@@ -652,9 +749,14 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- verbs ----------------------------------------------------------------
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         fn = GET_ROUTES.get(path)
         if fn:
+            if path == "/api/samples":
+                qs = parse_qs(parsed.query)
+                lang = qs.get("language", qs.get("lang", ["cpp"]))[0]
+                return self._run(fn, lang)
             return self._run(fn)
         if path.startswith("/api/"):
             return self._send_json({"error": "Unknown endpoint"}, 404)

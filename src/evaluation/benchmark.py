@@ -3,15 +3,17 @@ benchmark.py
 ------------
 Comparative evaluation benchmark harness for the Green Self-Healing Compiler.
 
-Evaluates:
-  1. Self-Healing Comparative Evaluation:
-     - Rule-Based Heuristic Patcher (heal_loop + auto_healer) up to max_attempts.
-     - Autonomous Gemini Agent (CompilerAgent) up to max_attempts.
-     - Methodological Integrity: Distinguishes baseline clean files from broken files requiring repair;
-       computes the true healing success rate strictly over broken files.
+Multi-Language Architecture Evaluation:
+  - C++ and C: Evaluates ML error classification (Scikit-Learn TF-IDF model) +
+    rule-based heuristic healing (auto_healer) + Autonomous Gemini Agent.
+  - Python and Java: Evaluates deterministic keyword-based diagnostic categorization +
+    Autonomous Gemini Agent (CompilerAgent). Rule-based healing is marked N/A as
+    repair relies on Gemini.
+  - Methodological Integrity: Distinguishes baseline clean files from broken files requiring repair;
+    computes the true healing success rate strictly over broken files.
 
 Outputs:
-  - Formatted results written to results/final.csv
+  - Formatted results written to results/final.csv (includes "language" column)
   - Markdown summary table saved to results/benchmark_summary.md and printed to stdout
 """
 
@@ -26,7 +28,7 @@ import tempfile
 import time
 import warnings
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -49,6 +51,7 @@ from auto_healer import attempt_fix
 from error_classifier import ErrorClassifier
 from build_dataset_from_tests import FILE_LABELS
 from agentic_compiler import CompilerAgent
+from languages import get_language, Language
 
 from ai.llm_client import LLMClient, load_env_file, DEFAULT_MODEL
 
@@ -76,7 +79,25 @@ MINI_LABELS: Dict[str, str] = {
 }
 
 
-def get_expected_category(file_path: str) -> Optional[str]:
+def detect_language(file_path: str) -> str:
+    """Identify the target programming language from file path or extension."""
+    parts = os.path.normpath(file_path).replace("\\", "/").split("/")
+    for p in parts:
+        if p.lower() in ("cpp", "c", "python", "java"):
+            return p.lower()
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".cpp":
+        return "cpp"
+    if ext in (".c", ".h"):
+        return "c"
+    if ext in (".py", ".pyw"):
+        return "python"
+    if ext == ".java":
+        return "java"
+    return "cpp"
+
+
+def get_expected_category(file_path: str, lang: Optional[str] = None) -> Optional[str]:
     """Look up ground-truth category by filename or fallback to heuristic."""
     base_name = os.path.basename(file_path)
     if base_name in FILE_LABELS:
@@ -84,10 +105,33 @@ def get_expected_category(file_path: str) -> Optional[str]:
     if base_name in MINI_LABELS:
         return MINI_LABELS[base_name]
 
+    if not lang:
+        lang = detect_language(file_path)
+
     lower = base_name.lower()
+    if lower.startswith("good") or "success" in lower or "clean" in lower:
+        return "clean"
+
+    if lang == "python":
+        if "indent" in lower:
+            return "indentation_error"
+        if "typo" in lower or "name" in lower or "undefined" in lower:
+            return "name_error"
+        if "colon" in lower or "paren" in lower or "print" in lower or "assignment" in lower or "syntax" in lower:
+            return "syntax_error"
+        return "syntax_error"
+
+    if lang == "java":
+        if "semicolon" in lower or "returntype" in lower or "return_type" in lower:
+            return "syntax_error"
+        if "import" in lower or "symbol" in lower or "typo" in lower or "string" in lower or "name" in lower:
+            return "name_error"
+        return "syntax_error"
+
+    # C / C++
     if "syntax" in lower or "semicolon" in lower or "brace" in lower:
         return "syntax_error"
-    if "undeclared" in lower or "name" in lower:
+    if "undeclared" in lower or "name" in lower or "counter" in lower:
         return "name_resolution"
     if "include" in lower or "header" in lower:
         return "missing_include"
@@ -104,36 +148,50 @@ def evaluate_classifier_match(
     source_code: str,
     file_path: str,
     classifier: ErrorClassifier,
+    lang: Optional[str] = None,
 ) -> Tuple[Optional[str], str, bool]:
     """
     Predict error category for the first compile diagnostic and check match
     against ground truth expected category.
+    - C++ and C use the trained ML classifier.
+    - Python and Java use deterministic keyword categories from compiler diagnostics.
     Returns: (expected_category, predicted_category, is_match)
     """
-    expected_cat = get_expected_category(file_path)
+    if not lang:
+        lang = detect_language(file_path)
+    expected_cat = get_expected_category(file_path, lang=lang)
 
+    language_obj = get_language(lang)
     with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_file = os.path.join(tmp_dir, os.path.basename(file_path))
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            f.write(source_code)
-
-        errors, _ = _compile(tmp_file)
-        pre_errors = _pre_scan(source_code)
-        all_diag = pre_errors + errors
+        if language_obj:
+            all_diag = language_obj.check(source_code, tmp_dir)
+        else:
+            tmp_file = os.path.join(tmp_dir, os.path.basename(file_path))
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                f.write(source_code)
+            errors, _ = _compile(tmp_file)
+            pre_errors = _pre_scan(source_code)
+            all_diag = pre_errors + errors
 
     first_err = next((e for e in all_diag if e.get("type") == "error"), None)
     if first_err is None and all_diag:
         first_err = all_diag[0]
 
-    if first_err:
+    if not first_err:
+        is_match = (expected_cat is None or expected_cat == "clean")
+        return expected_cat, "clean", is_match
+
+    # For C and C++, use the ML classifier (ErrorClassifier)
+    if lang in ("cpp", "c"):
         pred_cat, _ = classifier.predict(first_err.get("message", ""))
         pred_cat = pred_cat or "other"
         is_match = (expected_cat is not None and pred_cat.lower() == expected_cat.lower())
         return expected_cat, pred_cat, is_match
 
-    # Clean compilation (no errors/warnings)
-    is_match = (expected_cat is None or expected_cat == "clean")
-    return expected_cat, "clean", is_match
+    # For Python and Java, categorize by keyword mapping from compiler diagnostics (NOT ML)
+    pred_cat = first_err.get("category", "other")
+    is_match = (expected_cat is not None and pred_cat.lower() == expected_cat.lower())
+    return expected_cat, pred_cat, is_match
 
 
 def run_rule_based_healer(
@@ -141,23 +199,32 @@ def run_rule_based_healer(
     file_path: str,
     classifier: ErrorClassifier,
     max_attempts: int = 3,
+    lang: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Run rule-based healer (heal_loop logic + auto_healer heuristics only)
-    up to max_attempts. Runs in an isolated temp directory to protect original files.
+    Run rule-based healer (heal_loop logic + auto_healer heuristics only) up to max_attempts.
+    For C++ and C: runs the deterministic regex/AST rule-based healer.
+    For Python and Java: marks applicable=False as these languages use Gemini agent only.
     """
+    if not lang:
+        lang = detect_language(file_path)
+
     start_time = time.perf_counter()
     current_source = source_code
+    language_obj = get_language(lang)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_file = os.path.join(tmp_dir, os.path.basename(file_path))
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            f.write(current_source)
-
         # Initial check
-        errors, _ = _compile(tmp_file)
-        pre_errors = _pre_scan(current_source)
-        all_initial = pre_errors + errors
+        if language_obj:
+            all_initial = language_obj.check(current_source, tmp_dir)
+        else:
+            tmp_file = os.path.join(tmp_dir, os.path.basename(file_path))
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                f.write(current_source)
+            errors, _ = _compile(tmp_file)
+            pre_errors = _pre_scan(current_source)
+            all_initial = pre_errors + errors
+
         if not any(e.get("type") == "error" for e in all_initial):
             return {
                 "compiled": True,
@@ -165,16 +232,35 @@ def run_rule_based_healer(
                 "time_sec": round(time.perf_counter() - start_time, 3),
                 "healed": False,
                 "was_clean": True,
+                "applicable": True,
             }
 
+        # Python and Java use keyword categories + Gemini agent only (rule healing is N/A)
+        if lang in ("python", "java"):
+            return {
+                "compiled": False,
+                "attempts": 0,
+                "time_sec": 0.0,
+                "healed": False,
+                "was_clean": False,
+                "applicable": False,
+            }
+
+        # C++ and C use rule-based healing pass
         skipped_keys = set()
         attempts_used = 0
 
         for attempt in range(1, max_attempts + 1):
             attempts_used = attempt
-            errors, _ = _compile(tmp_file)
-            pre_errors = _pre_scan(current_source)
-            all_errors = pre_errors + errors
+            if language_obj:
+                all_errors = language_obj.check(current_source, tmp_dir)
+            else:
+                tmp_file = os.path.join(tmp_dir, os.path.basename(file_path))
+                with open(tmp_file, "w", encoding="utf-8") as f:
+                    f.write(current_source)
+                errors, _ = _compile(tmp_file)
+                pre_errors = _pre_scan(current_source)
+                all_errors = pre_errors + errors
 
             hard_errors = [e for e in all_errors if e.get("type") == "error"]
             if not hard_errors:
@@ -184,6 +270,7 @@ def run_rule_based_healer(
                     "time_sec": round(time.perf_counter() - start_time, 3),
                     "healed": True,
                     "was_clean": False,
+                    "applicable": True,
                 }
 
             _classify_errors(all_errors, classifier)
@@ -199,19 +286,26 @@ def run_rule_based_healer(
 
             current_source = patched
             skipped_keys.clear()
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                f.write(current_source)
 
             # Re-verify compilation after patch
-            check_errors, _ = _compile(tmp_file)
-            check_pre = _pre_scan(current_source)
-            if not any(e.get("type") == "error" for e in check_pre + check_errors):
+            if language_obj:
+                check_diags = language_obj.check(current_source, tmp_dir)
+            else:
+                tmp_file = os.path.join(tmp_dir, os.path.basename(file_path))
+                with open(tmp_file, "w", encoding="utf-8") as f:
+                    f.write(current_source)
+                check_errors, _ = _compile(tmp_file)
+                check_pre = _pre_scan(current_source)
+                check_diags = check_pre + check_errors
+
+            if not any(e.get("type") == "error" for e in check_diags):
                 return {
                     "compiled": True,
                     "attempts": attempts_used,
                     "time_sec": round(time.perf_counter() - start_time, 3),
                     "healed": True,
                     "was_clean": False,
+                    "applicable": True,
                 }
 
         return {
@@ -220,6 +314,7 @@ def run_rule_based_healer(
             "time_sec": round(time.perf_counter() - start_time, 3),
             "healed": False,
             "was_clean": False,
+            "applicable": True,
         }
 
 
@@ -228,15 +323,19 @@ def run_llm_agent(
     file_path: str,
     max_attempts: int = 3,
     client: Optional[LLMClient] = None,
+    lang: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run autonomous Gemini compiler agent up to max_attempts."""
+    if not lang:
+        lang = detect_language(file_path)
+
     start_time = time.perf_counter()
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_file = os.path.join(tmp_dir, os.path.basename(file_path))
         with open(tmp_file, "w", encoding="utf-8") as f:
             f.write(source_code)
 
-        agent = CompilerAgent(max_iterations=max_attempts, client=client)
+        agent = CompilerAgent(max_iterations=max_attempts, client=client, language=lang)
         try:
             result = agent.heal(source_code, tmp_file)
             return {
@@ -255,13 +354,39 @@ def run_llm_agent(
 
 
 def discover_test_cases(test_dir: str) -> List[str]:
-    """Recursively collect all .cpp test case files, excluding backups and duplicates."""
-    test_files = []
-    for root, _, files in os.walk(test_dir):
-        for f in files:
-            if f.endswith(".cpp") and not f.endswith(".heal_backup") and "- Copy" not in f:
-                test_files.append(os.path.join(root, f))
-    test_files.sort()
+    """Recursively collect test case files per language over test_cases/<lang>/ or flat folder."""
+    test_files: List[str] = []
+
+    # Check for language subdirectories (cpp, c, python, java)
+    subdirs = [d for d in ("cpp", "c", "python", "java") if os.path.isdir(os.path.join(test_dir, d))]
+
+    if subdirs:
+        ext_map = {
+            "cpp": (".cpp",),
+            "c": (".c", ".h"),
+            "python": (".py",),
+            "java": (".java",),
+        }
+        for lang in ("cpp", "c", "python", "java"):
+            lang_dir = os.path.join(test_dir, lang)
+            if not os.path.isdir(lang_dir):
+                continue
+            valid_exts = ext_map.get(lang, (".cpp",))
+            lang_files = []
+            for root, _, files in os.walk(lang_dir):
+                for f in files:
+                    if any(f.endswith(ext) for ext in valid_exts) and not f.endswith(".heal_backup") and "- Copy" not in f:
+                        lang_files.append(os.path.join(root, f))
+            lang_files.sort()
+            test_files.extend(lang_files)
+    else:
+        valid_exts = (".cpp", ".c", ".py", ".java")
+        for root, _, files in os.walk(test_dir):
+            for f in files:
+                if any(f.endswith(ext) for ext in valid_exts) and not f.endswith(".heal_backup") and "- Copy" not in f:
+                    test_files.append(os.path.join(root, f))
+        test_files.sort()
+
     return test_files
 
 
@@ -273,19 +398,20 @@ def format_markdown_table(
     """Format benchmark evaluation metrics into clean, technically accurate GitHub-flavored Markdown."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines: List[str] = [
-        f"# Self-Healing Compiler Benchmark Results",
+        "# Self-Healing Compiler Benchmark Results",
         f"\n*Generated: {timestamp}*",
-        f"*Default Model: `{DEFAULT_MODEL}` | Execution: Isolated Toolchain Sandbox*\n",
+        f"*Default Model: `{DEFAULT_MODEL}` | Execution: Multi-Language Isolated Toolchain Sandbox*\n",
     ]
 
-    # Section 1: Self-Healing Comparison Table
+    # Section 1: Comparative Evaluation by Fixture
     if healing_results:
         lines.append("## 1. Self-Healing Comparative Evaluation (Rule-Based vs Autonomous Gemini Agent)\n")
         lines.append("> **Methodology Note:** Fixtures are separated into baseline clean files (which require 0 repair attempts) and broken files requiring repair. Success rates are computed strictly over files needing repair.\n")
-        lines.append("| Test Fixture | Expected Category | Match | Baseline Clean? | Rule Healed | Rule Attempts | Rule Time (s) | AI Agent Healed | AI Attempts | AI Time (s) |")
-        lines.append("|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
+        lines.append("| Language | Test Fixture | Expected Category | Match | Baseline Clean? | Rule Healed | Rule Attempts | Rule Time (s) | AI Agent Healed | AI Attempts | AI Time (s) |")
+        lines.append("|:---|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
 
         for r in healing_results:
+            lang_col = r.get("language", "").upper()
             fname = os.path.basename(r.get("file", ""))
             exp_c = r.get("expected_category", "none")
             match = "✓" if r.get("category_matched") == "yes" else "✗"
@@ -294,11 +420,14 @@ def format_markdown_table(
             if r.get("baseline_clean"):
                 rule_h = "— CLEAN"
                 rule_att = "0"
+            elif r.get("rule_compiled") == "n/a":
+                rule_h = "— N/A"
+                rule_att = "0"
             else:
                 rule_h = "✓ YES" if r.get("rule_compiled") == "yes" else "✗ NO"
                 rule_att = str(r.get("rule_attempts", 0))
 
-            rule_t = f"{float(r.get('rule_time_sec', 0.0)):.3f}"
+            rule_t = f"{float(r.get('rule_time_sec', 0.0)):.3f}" if r.get("rule_compiled") != "n/a" else "—"
 
             llm_c = r.get("llm_compiled", "skipped")
             if r.get("baseline_clean"):
@@ -316,12 +445,64 @@ def format_markdown_table(
 
             ai_t = f"{float(r.get('llm_time_sec', 0.0)):.3f}"
 
-            lines.append(f"| `{fname}` | {exp_c} | {match} | {was_clean} | {rule_h} | {rule_att} | {rule_t} | {ai_h} | {ai_att} | {ai_t} |")
+            lines.append(f"| {lang_col} | `{fname}` | {exp_c} | {match} | {was_clean} | {rule_h} | {rule_att} | {rule_t} | {ai_h} | {ai_att} | {ai_t} |")
 
         lines.append("")
 
-    # Section 2: Aggregate Summary
+    # Section 2: Aggregate Performance & Verification Summary
     lines.append("## 2. Aggregate Performance & Verification Summary\n")
+
+    # Multi-Language Capabilities Matrix
+    lines.append("### A. Multi-Language Pipeline Capabilities Matrix\n")
+    lines.append("| Language | Target Toolchain | Error Categorization Method | Self-Healing Pipeline |")
+    lines.append("|:---|:---|:---|:---|")
+    lines.append("| **C++** | `g++` | **Machine Learning** (Scikit-Learn SGDClassifier / TF-IDF, 67k GCC rows) | **Two-Tier**: Rule-Based Heuristic (`auto_healer.py`) + Autonomous Gemini Agent |")
+    lines.append("| **C** | `gcc -std=c11` | **Machine Learning** (Scikit-Learn SGDClassifier / TF-IDF, 67k GCC rows) | **Two-Tier**: Rule-Based Heuristic (`auto_healer.py`) + Autonomous Gemini Agent |")
+    lines.append("| **Python** | `python -m py_compile` | **Deterministic Keywords** (AST / SyntaxError mapping, no ML) | **Autonomous Gemini Agent Only** (with fast heuristic tool assistance) |")
+    lines.append("| **Java** | `javac` | **Deterministic Keywords** (Compiler diagnostic mapping, no ML) | **Autonomous Gemini Agent Only** (with fast heuristic tool assistance) |\n")
+
+    # Per-Language Verification Summary
+    lines.append("### B. Per-Language Verification Summary\n")
+    lines.append("| Language | Total | Clean | Broken | Cat Match | Rule Heal Rate | Rule Avg Latency | AI Agent Heal Rate | AI Avg Latency |")
+    lines.append("|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
+
+    langs = ["cpp", "c", "python", "java"]
+    for lang in langs:
+        l_rows = [r for r in healing_results if r.get("language") == lang]
+        if not l_rows:
+            continue
+        tot = len(l_rows)
+        cln = sum(1 for r in l_rows if r.get("baseline_clean"))
+        brk = tot - cln
+        c_match = sum(1 for r in l_rows if r.get("category_matched") == "yes")
+        c_pct = (c_match / tot * 100.0) if tot > 0 else 0.0
+
+        r_healed = sum(1 for r in l_rows if not r.get("baseline_clean") and r.get("rule_compiled") == "yes")
+        r_rate = (r_healed / brk * 100.0) if brk > 0 else 0.0
+        r_applicable = any(not r.get("baseline_clean") and r.get("rule_compiled") != "n/a" for r in l_rows)
+        r_rate_str = f"**{r_rate:.1f}%** ({r_healed}/{brk})" if r_applicable else "— *(N/A: Gemini only)*"
+
+        r_avg = (sum(float(r.get("rule_time_sec", 0.0)) for r in l_rows if not r.get("baseline_clean") and r.get("rule_compiled") != "n/a") / brk) if (brk > 0 and r_applicable) else 0.0
+        r_avg_str = f"{r_avg:.3f} s" if r_applicable else "—"
+
+        ai_ran = [r for r in l_rows if not r.get("baseline_clean") and r.get("llm_compiled") in ("yes", "no")]
+        if ai_ran:
+            ai_healed = sum(1 for r in ai_ran if r.get("llm_compiled") == "yes")
+            ai_rate = (ai_healed / len(ai_ran) * 100.0) if ai_ran else 0.0
+            ai_rate_str = f"**{ai_rate:.1f}%** ({ai_healed}/{len(ai_ran)})"
+            ai_avg = sum(float(r.get("llm_time_sec", 0.0)) for r in ai_ran) / len(ai_ran) if ai_ran else 0.0
+            ai_avg_str = f"{ai_avg:.3f} s"
+        else:
+            ai_rate_str = "— *(Skipped)*"
+            ai_avg_str = "—"
+
+        lang_label = {"cpp": "C++", "c": "C", "python": "Python", "java": "Java"}.get(lang, lang.upper())
+        lines.append(f"| **{lang_label}** | {tot} | {cln} | {brk} | {c_pct:.1f}% ({c_match}/{tot}) | {r_rate_str} | {r_avg_str} | {ai_rate_str} | {ai_avg_str} |")
+
+    lines.append("")
+
+    # Aggregate Overall Table
+    lines.append("### C. Overall Aggregate Benchmark Metrics\n")
     lines.append("| Metric Category | Evaluated Metric | Value / Rate | Technical Assessment & Boundary |")
     lines.append("|:---|:---|:---|:---|")
 
@@ -333,15 +514,16 @@ def format_markdown_table(
         cat_matches = sum(1 for r in healing_results if r.get("category_matched") == "yes")
         cat_acc = (cat_matches / total_h) * 100.0 if total_h > 0 else 0.0
 
+        rule_applicable_broken = sum(1 for r in healing_results if not r.get("baseline_clean") and r.get("rule_compiled") in ("yes", "no"))
         rule_healed = sum(1 for r in healing_results if not r.get("baseline_clean") and r.get("rule_compiled") == "yes")
-        rule_rate = (rule_healed / broken_count * 100.0) if broken_count > 0 else 0.0
-        rule_avg_t = sum(float(r.get("rule_time_sec", 0.0)) for r in healing_results) / total_h if total_h > 0 else 0.0
+        rule_rate = (rule_healed / rule_applicable_broken * 100.0) if rule_applicable_broken > 0 else 0.0
+        rule_avg_t = (sum(float(r.get("rule_time_sec", 0.0)) for r in healing_results if not r.get("baseline_clean") and r.get("rule_compiled") in ("yes", "no")) / rule_applicable_broken) if rule_applicable_broken > 0 else 0.0
 
-        lines.append(f"| Self-Healing | Total C++ Test Fixtures | **{total_h}** | Evaluated fixtures in `test_cases/` |")
+        lines.append(f"| Evaluation Suite | Total Multi-Language Fixtures | **{total_h}** | Evaluated fixtures in `test_cases/<lang>/` (C++, C, Python, Java) |")
         lines.append(f"| Self-Healing | Baseline Clean Files | **{clean_count}/{total_h}** ({clean_count/total_h*100:.1f}%) | Compiled with 0 errors initially (excluded from heal rate) |")
         lines.append(f"| Self-Healing | Broken Files Requiring Repair | **{broken_count}/{total_h}** ({broken_count/total_h*100:.1f}%) | Ground-truth compilation failures requiring repair |")
-        lines.append(f"| Self-Healing | Classifier Category Accuracy | **{cat_acc:.1f}%** ({cat_matches}/{total_h}) | Evaluated against heuristic metadata labels |")
-        lines.append(f"| Self-Healing | **Rule-Based Repair Success Rate** | **{rule_rate:.1f}%** ({rule_healed}/{broken_count}) | Simple localized regex AST fixes on broken files |")
+        lines.append(f"| Classification | Diagnostic Match Accuracy | **{cat_acc:.1f}%** ({cat_matches}/{total_h}) | ML for C++/C; keyword diagnostics for Python/Java |")
+        lines.append(f"| Self-Healing | **Rule-Based Repair Success Rate** | **{rule_rate:.1f}%** ({rule_healed}/{rule_applicable_broken}) | Over C++/C broken files where rule healing is active |")
         lines.append(f"| Self-Healing | Rule-Based Average Latency | **{rule_avg_t:.3f} s** | Ultra-low latency static repair pass |")
 
         llm_evaluated = any(not r.get("baseline_clean") and r.get("llm_compiled") in ("yes", "no") for r in healing_results)
@@ -349,8 +531,8 @@ def format_markdown_table(
             llm_healed = sum(1 for r in healing_results if not r.get("baseline_clean") and r.get("llm_compiled") == "yes")
             llm_rate = (llm_healed / broken_count * 100.0) if broken_count > 0 else 0.0
             llm_avg_t = sum(float(r.get("llm_time_sec", 0.0)) for r in healing_results if not r.get("baseline_clean")) / broken_count if broken_count > 0 else 0.0
-            lines.append(f"| Self-Healing | **Autonomous Gemini Agent Success** | **{llm_rate:.1f}%** ({llm_healed}/{broken_count}) | Multi-tier reasoning with backoff & AAI Guardrails |")
-            lines.append(f"| Self-Healing | Gemini Agent Average Latency | **{llm_avg_t:.3f} s** | Deep contextual analysis on broken files |")
+            lines.append(f"| Self-Healing | **Autonomous Gemini Agent Success** | **{llm_rate:.1f}%** ({llm_healed}/{broken_count}) | Evaluated across all 4 languages with AAI Guardrails |")
+            lines.append(f"| Self-Healing | Gemini Agent Average Latency | **{llm_avg_t:.3f} s** | Multi-tier reasoning with backoff & verification |")
             lines.append(f"| Self-Healing | **AI Healing Advantage (Lift)** | **+{llm_rate - rule_rate:.1f}%** | Improvement over static rule-based heuristics |")
         else:
             lines.append(f"| Self-Healing | Autonomous Gemini Agent Status | **SKIPPED** | Offline evaluation (`--no-llm`) |")
@@ -369,7 +551,7 @@ def print_summary_table(
     total = len(healing_results)
 
     print("\n" + "=" * 80)
-    print("BENCHMARK EVALUATION SUMMARY TABLE")
+    print("MULTI-LANGUAGE BENCHMARK EVALUATION SUMMARY TABLE")
     print("=" * 80)
 
     if total > 0:
@@ -379,22 +561,23 @@ def print_summary_table(
         cat_matches = sum(1 for r in healing_results if r.get("category_matched") == "yes")
         cat_accuracy = (cat_matches / total) * 100.0
 
+        rule_applicable_broken = sum(1 for r in healing_results if not r.get("baseline_clean") and r.get("rule_compiled") in ("yes", "no"))
         rule_healed = sum(1 for r in healing_results if not r.get("baseline_clean") and r.get("rule_compiled") == "yes")
-        rule_rate = (rule_healed / broken_count * 100.0) if broken_count > 0 else 0.0
+        rule_rate = (rule_healed / rule_applicable_broken * 100.0) if rule_applicable_broken > 0 else 0.0
 
         print("+" + "-" * 42 + "+" + "-" * 35 + "+")
         print(f"| {'Self-Healing Metric':<40} | {'Result':<33} |")
         print("+" + "-" * 42 + "+" + "-" * 35 + "+")
-        print(f"| {'Total Test Fixtures Evaluated':<40} | {total:<33} |")
+        print(f"| {'Total Multi-Lang Fixtures Evaluated':<40} | {total:<33} |")
         print(f"| {'Baseline Clean (No repair needed)':<40} | {clean_count}/{total} ({clean_count/total*100:.1f}%) |")
         print(f"| {'Broken Fixtures Requiring Repair':<40} | {broken_count}/{total} ({broken_count/total*100:.1f}%) |")
-        print(f"| {'Classifier Category Match Accuracy':<40} | {cat_matches}/{total} ({cat_accuracy:.1f}%) |")
-        print(f"| {'Rule-Based Repair Success Rate':<40} | {rule_healed}/{broken_count} ({rule_rate:.1f}%) |")
+        print(f"| {'Category Match Accuracy (All)':<40} | {cat_matches}/{total} ({cat_accuracy:.1f}%) |")
+        print(f"| {'Rule-Based Repair Success (C++/C)':<40} | {rule_healed}/{rule_applicable_broken} ({rule_rate:.1f}%) |")
 
         if not no_llm:
             llm_healed = sum(1 for r in healing_results if not r.get("baseline_clean") and r.get("llm_compiled") == "yes")
             llm_rate = (llm_healed / broken_count * 100.0) if broken_count > 0 else 0.0
-            print(f"| {'Gemini Agent Repair Success Rate':<40} | {llm_healed}/{broken_count} ({llm_rate:.1f}%) |")
+            print(f"| {'Gemini Agent Repair Rate (All)':<40} | {llm_healed}/{broken_count} ({llm_rate:.1f}%) |")
             print(f"| {'AI Agent Healing Advantage (Lift)':<40} | +{llm_rate - rule_rate:.1f}% |")
         else:
             print(f"| {'Gemini Agent (LLM) Status':<40} | {'SKIPPED (--no-llm)':<33} |")
@@ -413,11 +596,11 @@ def run_benchmark(
     markdown_path: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Run full comparative benchmark across self-healing test cases.
-    Writes results to output_csv and outputs Markdown summary table.
+    Run full comparative benchmark across multi-language self-healing test cases.
+    Writes results to output_csv with a 'language' column and outputs Markdown summary table.
     """
     print("=" * 80)
-    print("[BENCHMARK] STARTING GREEN COMPILER COMPARATIVE BENCHMARK")
+    print("[BENCHMARK] STARTING GREEN COMPILER MULTI-LANGUAGE BENCHMARK")
     print("=" * 80)
     print(f"Test cases directory     : {test_dir}")
     print(f"Results CSV output       : {output_csv}")
@@ -429,7 +612,7 @@ def run_benchmark(
     if limit:
         test_files = test_files[:limit]
 
-    print(f"Discovered {len(test_files)} test case(s) for evaluation.\n")
+    print(f"Discovered {len(test_files)} test case(s) across languages for evaluation.\n")
 
     classifier = ErrorClassifier()
     if not classifier.is_trained():
@@ -443,7 +626,9 @@ def run_benchmark(
             rel_path = os.path.relpath(fpath, _PROJECT_ROOT).replace("\\", "/")
         except ValueError:
             rel_path = os.path.basename(fpath)
-        print(f"[{idx:02d}/{len(test_files):02d}] Evaluating {rel_path}...", end=" ", flush=True)
+
+        lang_id = detect_language(fpath)
+        print(f"[{idx:02d}/{len(test_files):02d}] [{lang_id.upper()}] Evaluating {rel_path}...", end=" ", flush=True)
 
         try:
             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
@@ -453,30 +638,37 @@ def run_benchmark(
             continue
 
         # 1. Error Category Classification Match
-        exp_cat, pred_cat, cat_matched = evaluate_classifier_match(source_code, fpath, classifier)
+        exp_cat, pred_cat, cat_matched = evaluate_classifier_match(source_code, fpath, classifier, lang=lang_id)
 
-        # 2. (a) Rule-Based Healer
-        rule_res = run_rule_based_healer(source_code, fpath, classifier, max_attempts=max_attempts)
+        # 2. Rule-Based Healer
+        rule_res = run_rule_based_healer(source_code, fpath, classifier, max_attempts=max_attempts, lang=lang_id)
         was_clean = rule_res.get("was_clean", False)
+        applicable = rule_res.get("applicable", True)
 
-        # 3. (b) LLM Agent (CompilerAgent)
+        # 3. LLM Agent (CompilerAgent)
         if no_llm:
             llm_res = {"compiled": "skipped", "attempts": 0, "time_sec": 0.0}
         elif was_clean:
             # Clean files do not require LLM healing
             llm_res = {"compiled": True, "attempts": 0, "time_sec": 0.0, "tier": "clean"}
         else:
-            llm_res = run_llm_agent(source_code, fpath, max_attempts=max_attempts)
-            time.sleep(0.8)
+            llm_res = run_llm_agent(source_code, fpath, max_attempts=max_attempts, lang=lang_id)
+            time.sleep(0.3)
+
+        if not applicable and not was_clean:
+            rule_compiled_str = "n/a"
+        else:
+            rule_compiled_str = "yes" if rule_res["compiled"] else "no"
 
         record: Dict[str, Any] = {
             "suite": "healing",
+            "language": lang_id,
             "file": rel_path,
             "expected_category": exp_cat or "none",
             "predicted_category": pred_cat,
             "category_matched": "yes" if cat_matched else "no",
             "baseline_clean": was_clean,
-            "rule_compiled": "yes" if rule_res["compiled"] else "no",
+            "rule_compiled": rule_compiled_str,
             "rule_attempts": rule_res["attempts"],
             "rule_time_sec": rule_res["time_sec"],
             "llm_compiled": (
@@ -492,16 +684,20 @@ def run_benchmark(
             rule_status = "[CLEAN]"
             llm_status = "[CLEAN]"
         else:
-            rule_status = "[HEALED]" if rule_res["compiled"] else "[FAILED]"
+            if not applicable:
+                rule_status = "[N/A]"
+            else:
+                rule_status = "[HEALED]" if rule_res["compiled"] else "[FAILED]"
             llm_status = "[SKIPPED]" if no_llm else ("[HEALED]" if llm_res["compiled"] else "[FAILED]")
 
         cat_status = "[MATCH]" if cat_matched else "[MISMATCH]"
         print(f"Rule: {rule_status} | LLM: {llm_status} | Cat: {cat_status}")
 
-    # Write unified CSV
+    # Write unified CSV with 'language' column
     os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
     csv_headers = [
         "suite",
+        "language",
         "file",
         "expected_category",
         "predicted_category",
@@ -547,7 +743,7 @@ def main() -> None:
     parser.add_argument(
         "--test-dir",
         default=os.path.join(_PROJECT_ROOT, "test_cases"),
-        help="Directory containing C++ test case fixtures",
+        help="Directory containing multi-language test case fixtures (test_cases/<lang>/)",
     )
     parser.add_argument(
         "--output",

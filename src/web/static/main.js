@@ -3,7 +3,7 @@
 
 const ROUTES = [
   { group: 'Work', items: [
-    { id: 'workspace', label: 'C++ Studio', title: 'C++ Studio', icon: 'code', render: pageWorkspace },
+    { id: 'workspace', label: 'Code Studio', title: 'Code Studio', icon: 'code', render: pageWorkspace },
     { id: 'ast', label: 'Syntax tree', title: 'Syntax tree', icon: 'tree', render: pageAst },
     { id: 'changes', label: 'Changes', title: 'Changes', icon: 'diff', badge: true, render: pageChanges },
   ] },
@@ -211,7 +211,7 @@ function themeButton() {
 
 function buildStatus() {
   const st = state.status || {};
-  const chip = (cls, text) => el('span', { class: 'chip ' + cls }, el('i'), text);
+  const chip = (cls, text, tip) => el('span', { class: 'chip ' + cls, title: tip || text }, el('i'), text);
 
   const hamburger = el('button', {
     class: 'menu-trigger',
@@ -222,17 +222,39 @@ function buildStatus() {
     onclick: toggleMobileDrawer
   }, icon('menu'));
 
+  const toolchainNames = { cpp: 'g++', c: 'gcc', python: 'python', java: 'javac' };
+  const languagesList = st.languages || [
+    { id: 'cpp', name: 'C++', available: !!st.gxx },
+    { id: 'c', name: 'C', available: true },
+    { id: 'python', name: 'Python', available: true },
+    { id: 'java', name: 'Java', available: true },
+  ];
+
+  const toolchainChips = languagesList.map(l => {
+    const tc = toolchainNames[l.id] || l.name;
+    const label = `${tc} ${l.available ? 'found' : 'missing'}`;
+    const tip = `${l.name} (${tc}): ${l.available ? 'toolchain available' : 'toolchain missing'}`;
+    return chip(l.available ? 'ok' : 'bad', label, tip);
+  });
+
+  const aiChip = chip(
+    st.llm_mock ? 'warn' : st.ai_ready ? 'ok' : 'warn',
+    st.llm_mock ? 'AI: mock mode' : st.ai_ready ? 'AI: Gemini ready' : 'AI: no API key'
+  );
+
   $('#topbar').replaceChildren(
     el('div', { class: 'topbar-left' }, hamburger),
-    chip(st.gxx ? 'ok' : 'bad', st.gxx ? 'g++ found' : 'g++ missing'),
-    chip(st.clang ? 'ok' : 'warn', st.clang ? 'clang++ found' : 'clang++ missing (C++ tree off)'),
-    chip(st.llm_mock ? 'warn' : st.ai_ready ? 'ok' : 'warn', st.llm_mock ? 'AI: mock mode' : st.ai_ready ? 'AI: Gemini ready' : 'AI: no API key')
+    ...toolchainChips,
+    aiChip
   );
 
   const banner = $('#banner');
   banner.replaceChildren();
   if (st.llm_mock) banner.append(notice('warn', el('b', { text: 'Mock mode is on. ' }), 'AI answers are canned examples, not real model output. Unset LLM_MOCK for real results.'));
-  if (!st.gxx) banner.append(notice('bad', el('b', { text: 'g++ was not found. ' }), 'Install a C++ toolchain and restart; C++ checking and healing need it.'));
+  languagesList.filter(l => !l.available).forEach(l => {
+    const tc = toolchainNames[l.id] || l.name;
+    banner.append(notice('bad', el('b', { text: `${tc} was not found. ` }), `${l.name} checking and healing need it.`));
+  });
 }
 
 function route() {
@@ -315,14 +337,26 @@ async function boot() {
     return;
   }
 
-  const firstCpp = state.samples.find(s => s.language === 'cpp');
-  const draft = store.get('cppDraft', null);
+  const lang = store.get('studio:lang', 'cpp');
+  state.cpp.language = lang;
+  try {
+    const samplesData = await call('/api/samples?language=' + lang);
+    if (samplesData && samplesData.samples) state.samples = samplesData.samples;
+  } catch (e) {}
+
+  const defaultFiles = { cpp: 'main.cpp', c: 'main.c', python: 'main.py', java: 'Main.java' };
+  const draft = store.get('studio:draft:' + lang, null) || (lang === 'cpp' ? store.get('cppDraft', null) : null);
   if (draft && typeof draft.code === 'string' && draft.code.trim()) {
     state.cpp.code = draft.code;
-    state.cpp.name = draft.name || 'main.cpp';
-  } else if (firstCpp) {
-    state.cpp.code = firstCpp.code;
-    state.cpp.name = 'main.cpp';
+    state.cpp.filename = draft.filename || draft.name || defaultFiles[lang] || 'main.cpp';
+  } else {
+    const first = (state.samples || []).find(s => s.language === lang) || (state.samples || [])[0];
+    if (first) {
+      state.cpp.code = first.code;
+      state.cpp.filename = first.filename || defaultFiles[lang] || 'main.cpp';
+    } else {
+      state.cpp.filename = defaultFiles[lang] || 'main.cpp';
+    }
   }
 
   buildStatus();

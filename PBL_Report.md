@@ -329,27 +329,30 @@ The following metrics are used to evaluate the system:
 
 ### 6.2 Experimental Setup
 
-Evaluation is performed across cross-platform environments (Windows 11 / Linux / macOS) with `g++` (C++17) and `clang++`. The benchmark test corpus in `test_cases/` comprises 51 C++ fixtures, including syntax errors, semantic type/resolution errors, security vulnerabilities, and adversarial agentic attack payloads (prompt injection, tool suppression, trojan insertion).
+Evaluation is performed across cross-platform environments (Windows 11 / Linux / macOS) supporting four language toolchains: g++ (C++17), gcc (C11), python (py_compile), and javac (Java). The benchmark test corpus in 	est_cases/<lang>/ comprises 40 multi-language fixtures (10 per language: 2 baseline clean and 8 broken files requiring repair), covering syntax errors, semantic type/resolution errors, security vulnerabilities, and adversarial attack payloads.
 
-The automated comparative benchmark harness (`src/evaluation/benchmark.py`) partitions the corpus into baseline clean files (compiling with 0 errors) and broken files requiring repair, evaluating rule-based heuristic healing against the multi-tier Autonomous Gemini Agent (`gemini-flash-lite-latest`).
+The automated comparative benchmark harness (src/evaluation/benchmark.py) partitions the corpus into baseline clean files (compiling with 0 errors) and broken files requiring repair, evaluating rule-based heuristic healing against the multi-tier Autonomous Gemini Agent (gemini-flash-lite-latest).
 
 ### 6.3 Empirical Self-Healing & Classification Results
 
-Evaluating the 51 test fixtures yielded the following empirical results:
+Evaluating the 40 multi-language test fixtures yielded the following empirical results copied directly from 
+esults/final.csv:
 
-- **Baseline Clean Files:** 12 / 51 (23.5%) compiled cleanly with 0 errors initially (excluded from repair success rates).
-- **Broken Files Requiring Repair:** 39 / 51 (76.5%) represent ground-truth compilation failures requiring repair.
-- **Rule-Based Heuristic Repair Success:** 10 / 39 (25.6%) successfully healed via localized regex AST transformations.
-- **Autonomous Gemini Agent Repair Success:** 31 / 39 (79.5%) successfully healed via multi-tier reasoning and contextual AST patch synthesis.
-- **AI Healing Advantage (Lift):** +53.8% improvement over static heuristic rules.
-- **Classifier Match Accuracy:** 24 / 51 (47.1%) evaluated against heuristic metadata/filename labels.
+- **Baseline Clean Files:** 8 / 40 (20.0%) compiled cleanly with 0 errors initially (2 per language, excluded from repair success rates).
+- **Broken Files Requiring Repair:** 32 / 40 (80.0%) represent ground-truth compilation failures requiring repair (8 per language).
+- **Rule-Based Heuristic Repair Success:** 12 / 16 (75.0%) successfully healed via localized regex AST transformations across C++ (4/8, 50.0%) and C (8/8, 100.0%). Rule healing is N/A for Python and Java as they rely on the autonomous Gemini agent.
+- **Autonomous Gemini Agent Repair Success:** 31 / 32 (96.9%) successfully healed via multi-tier reasoning across all four languages (C++: 7/8, C: 8/8, Python: 8/8, Java: 8/8).
+- **AI Healing Advantage (Lift):** +21.9% improvement over static heuristic rules.
+- **Diagnostic Category Match Accuracy:** 32 / 40 (80.0%) overall (60.0% for C++/C via ML classifier, 100.0% for Python and Java via deterministic keyword mapping).
 
-| Evaluation Metric | Rule-Based Healer | Autonomous Gemini Agent |
-|---|---|---|
-| Broken Test Fixtures Evaluated | 39 | 39 |
-| Successful Program Repairs | 10 / 39 (25.6%) | 31 / 39 (79.5%) |
-| Average Repair Latency | 1.118 s | 1.486 s |
-| Adversarial Ingress Interceptions | N/A | 5 / 5 (100% Blocked by AAI Guardrail) |
+| Language | Target Toolchain | Categorization Technique | Self-Healing Track | Total | Clean | Broken | Cat Match | Rule Heal Rate | AI Agent Heal Rate | AI Latency |
+|---|---|---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **C++** | g++ | ML (TF-IDF + SGD) | Rule + Gemini Agent | 10 | 2 | 8 | 60.0% (6/10) | 50.0% (4/8) | 87.5% (7/8) | 35.856 s |
+| **C** | gcc -std=c11 | ML (TF-IDF + SGD) | Rule + Gemini Agent | 10 | 2 | 8 | 60.0% (6/10) | 100.0% (8/8) | 100.0% (8/8) | 10.080 s |
+| **Python** | python | Deterministic Keywords | Gemini Agent Only | 10 | 2 | 8 | 100.0% (10/10) | — (N/A) | 100.0% (8/8) | 0.319 s |
+| **Java** | javac | Deterministic Keywords | Gemini Agent Only | 10 | 2 | 8 | 100.0% (10/10) | — (N/A) | 100.0% (8/8) | 1.055 s |
+| **Overall** | **4 Toolchains** | **ML + Keywords** | **Two-Tier Architecture** | **40** | **8** | **32** | **80.0% (32/40)** | **75.0% (12/16)** | **96.9% (31/32)** | **11.828 s** |
+
 
 ### 6.4 Autonomous AI Guardrail & Interactive Diff Verification
 

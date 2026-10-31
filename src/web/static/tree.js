@@ -87,14 +87,16 @@ function pageAst(root) {
   const btnRefresh = el('button', { class: 'btn', title: 'Re-parse the current C++ program', onClick: () => load() }, 'Refresh');
 
   function rebuildPickers() {
+    const currentLang = (state.cpp && state.cpp.language) || 'cpp';
+    const ext = { cpp: '.cpp', c: '.c', python: '.py', java: '.java' }[currentLang] || '.cpp';
     loaderHost.replaceChildren(FileLoader({
-      accept: CPP_FILE_ACCEPT,
+      accept: '.cpp,.cc,.cxx,.c++,.c,.h,.hpp,.hh,.py,.pyw,.java,.txt',
       label: 'Open file',
       onLoad: (t, n) => applyCode(t, n),
       onError: (m) => { host.prepend(notice('bad', m)); announce(m); }
     }));
-    pickerHost.replaceChildren(SamplePicker('cpp', (smp) => {
-      const slug = (smp.name || 'sample').toLowerCase().replace(/[^a-z0-9]+/g, '_') + '.cpp';
+    pickerHost.replaceChildren(SamplePicker(currentLang, (smp) => {
+      const slug = smp.filename || ((smp.name || 'sample').toLowerCase().replace(/[^a-z0-9]+/g, '_') + ext);
       applyCode(smp.code, slug);
     }));
   }
@@ -102,26 +104,54 @@ function pageAst(root) {
   async function load() {
     graph = null; list = null;
     host.replaceChildren(el('div', { class: 'working' }, el('span', { class: 'spinner', 'aria-hidden': 'true' }), 'Building the syntax tree…'));
+
+    const currentLang = (state.cpp && state.cpp.language) || 'cpp';
+    if (currentLang === 'java') {
+      host.replaceChildren(
+        el('div', { class: 'panel' },
+          el('div', { class: 'empty' },
+            el('b', { text: 'Syntax tree is not available for Java' }),
+            el('p', { class: 'muted', style: 'margin-top:6px', text: 'Syntax tree visualization is not supported for Java yet. Switch to C++, C, or Python in Code Studio to inspect syntax trees.' }),
+            el('p', { style: 'margin-top:16px' },
+              el('button', { class: 'btn primary', onClick: () => { location.hash = '#/workspace'; } }, 'Go to Code Studio')
+            )
+          )
+        )
+      );
+      return;
+    }
+
     try {
       const code = (state.cpp && state.cpp.code) || '';
       if (!code.trim()) {
-        host.replaceChildren(emptyState('No C++ program loaded',
-          'Write or compile code in C++ Studio, or open a file / load an example above.'));
+        host.replaceChildren(emptyState('No code loaded',
+          'Write or compile code in Code Studio, or open a file / load an example above.'));
         return;
       }
-      const d = await call('/api/cpp/ast', { code });
+      const d = await call('/api/cpp/ast', { code, language: currentLang });
       const roots = (d.tree || []).map(normClang);
       if (!roots.length) {
-        host.replaceChildren(emptyState('clang produced no tree',
-          'The file may have fatal syntax errors or clang++ is unavailable. Check it in C++ Studio and fix the problems first.'));
+        host.replaceChildren(emptyState('Parser produced no tree',
+          'The file may have fatal syntax errors or the toolchain is unavailable. Check it in Code Studio and fix the problems first.'));
         return;
       }
       build(roots, code);
     } catch (e) {
+      if (e.message && (e.message.toLowerCase().includes('not supported') || e.message.toLowerCase().includes('no syntax tree'))) {
+        host.replaceChildren(
+          el('div', { class: 'panel' },
+            el('div', { class: 'empty' },
+              el('b', { text: 'Syntax tree is not available for ' + (currentLang.toUpperCase()) }),
+              el('p', { class: 'muted', style: 'margin-top:6px', text: e.message })
+            )
+          )
+        );
+        return;
+      }
       host.replaceChildren(
         notice('bad', e.message),
-        !state.status.clang
-          ? el('p', { class: 'muted', style: 'margin-top:12px', text: 'clang++ is not installed or not on PATH. Install clang and restart the server to enable syntax tree visualization.' })
+        !state.status.clang && currentLang === 'cpp'
+          ? el('p', { class: 'muted', style: 'margin-top:12px', text: 'clang++ is not installed or not on PATH. Install clang and restart the server to enable C++ syntax tree visualization.' })
           : null
       );
     }

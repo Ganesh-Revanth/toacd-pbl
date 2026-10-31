@@ -10,6 +10,8 @@ from typing import Dict, List, Optional
 from .base import Language, NotSupported, ToolchainNotFound, _scrub_paths, _to_jsonable
 from .cpp import CppLanguage
 from .c import CLanguage
+from .python import PythonLanguage
+from .java import JavaLanguage
 
 _REGISTRY: Dict[str, Language] = {}
 
@@ -31,6 +33,8 @@ def list_languages() -> List[Language]:
 # Register built-in languages
 register_language(CppLanguage())
 register_language(CLanguage())
+register_language(PythonLanguage())
+register_language(JavaLanguage())
 
 __all__ = [
     "Language",
@@ -38,6 +42,8 @@ __all__ = [
     "ToolchainNotFound",
     "CppLanguage",
     "CLanguage",
+    "PythonLanguage",
+    "JavaLanguage",
     "register_language",
     "get_language",
     "list_languages",

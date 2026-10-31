@@ -14,7 +14,7 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from agent_tools import compile_code, inspect_ast, security_audit, try_fast_heal
+from agent_tools import _resolve_language, compile_code, inspect_ast, security_audit, try_fast_heal
 from aai_guardrail import AAIGuardrail, GuardrailResult
 from ai.llm_client import (
     DEFAULT_MODEL,
@@ -25,6 +25,13 @@ from ai.llm_client import (
     LLMClient,
     get_stored_api_key,
 )
+
+_TOOLCHAIN_NAMES: Dict[str, str] = {
+    "cpp": "g++",
+    "c": "gcc",
+    "python": "python (py_compile)",
+    "java": "javac",
+}
 
 
 AI_CONFIG_FILE = "ai_config.json"
@@ -88,10 +95,12 @@ class CompilerAgent:
         model: Optional[str] = None,
         max_iterations: int = 6,
         client: Optional[LLMClient] = None,
+        language: Any = "cpp",
     ):
         self.api_key = api_key or get_stored_api_key()
         self.model = model or DEFAULT_MODEL
         self.max_iterations = max_iterations
+        self.language = language
         self.guardrail = AAIGuardrail()
         self.client = client or LLMClient(
             api_key=self.api_key,
@@ -122,10 +131,16 @@ class CompilerAgent:
         source_code: str,
         file_path: Optional[str] = None,
         on_step: Optional[Callable[[int, str, str, Dict[str, Any]], None]] = None,
+        language: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Executes the Secure Agentic ReAct Healing Loop powered by Google AI Studio.
         """
+        lang = _resolve_language(language if language is not None else self.language, file_path)
+        lang_id = getattr(lang, "id", "cpp").lower()
+        lang_name = getattr(lang, "name", "C++")
+        toolchain_name = _TOOLCHAIN_NAMES.get(lang_id, lang_name)
+
         history = []
         current_code = source_code
 
@@ -155,8 +170,8 @@ class CompilerAgent:
             }
 
         # ── Step 1: Initial Perception ─────────────────────────────────────────
-        compile_res = compile_code(current_code, file_path)
-        security_res = security_audit(current_code, file_path, compile_res.get("errors"))
+        compile_res = compile_code(current_code, file_path, language=lang)
+        security_res = security_audit(current_code, file_path, compile_res.get("errors"), language=lang)
 
         if compile_res["success"] and security_res["is_secure"]:
             return {
@@ -171,10 +186,10 @@ class CompilerAgent:
         # ── Step 2: Fast Heuristic Pass (Tier 1) ──────────────────────────────
         if compile_res["errors"]:
             first_err = compile_res["errors"][0]
-            fast_patched = try_fast_heal(current_code, first_err)
+            fast_patched = try_fast_heal(current_code, first_err, language=lang)
             if fast_patched and fast_patched != current_code:
-                test_compile = compile_code(fast_patched, file_path)
-                test_sec = security_audit(fast_patched, file_path, test_compile.get("errors"))
+                test_compile = compile_code(fast_patched, file_path, language=lang)
+                test_sec = security_audit(fast_patched, file_path, test_compile.get("errors"), language=lang)
                 if test_compile["success"] and test_sec["is_secure"]:
                     if on_step:
                         on_step(
@@ -197,7 +212,7 @@ class CompilerAgent:
             error_bullets = "\n".join(
                 f"- Line {e.get('line')}: [{e.get('type')}] {e.get('message')}"
                 for e in compile_res.get("errors", [])
-            ) or "None (Clean compilation)"
+            ) or f"None (Clean {toolchain_name} compilation)"
 
             sec_bullets = "\n".join(
                 f"- Line {f.get('line')}: [{f.get('severity')}] {f.get('vulnerability_type')} -> {f.get('description')} [Fix Hint: {f.get('recommendation', 'Fix safely')}]"
@@ -205,8 +220,8 @@ class CompilerAgent:
             ) or "None (Clean security profile)"
 
             system_prompt = (
-                "You are an expert Autonomous C++ Compiler and Security Agent for a Green Self-Healing Compiler.\n"
-                "Your objective is to fix all compilation errors and security vulnerabilities in the provided C++ code.\n"
+                f"You are an expert Autonomous {lang_name} Compiler and Security Agent for a Green Self-Healing Compiler using {toolchain_name}.\n"
+                f"Your objective is to fix all compilation errors and security vulnerabilities in the provided {lang_name} code.\n"
                 "Strict Security Rules:\n"
                 "1. Preserve the programmer's original architecture and intent.\n"
                 "2. Do NOT introduce insecure functions (avoid gets, strcpy, unsafe buffers).\n"
@@ -217,14 +232,14 @@ class CompilerAgent:
                 "[Explain your root cause analysis, error relationships, and fix strategy here]\n"
                 "</thought>\n"
                 "<patched_code>\n"
-                "[Provide the COMPLETE fixed C++ code here without markdown fences]\n"
+                f"[Provide the COMPLETE fixed {lang_name} code here without markdown fences]\n"
                 "</patched_code>"
             )
 
             user_prompt = (
                 f"Iteration: {step} of {self.max_iterations}\n\n"
-                f"### CURRENT C++ CODE:\n{current_code}\n\n"
-                f"### COMPILER DIAGNOSTICS (g++):\n{error_bullets}\n\n"
+                f"### CURRENT {lang_name.upper()} CODE:\n{current_code}\n\n"
+                f"### COMPILER DIAGNOSTICS ({toolchain_name}):\n{error_bullets}\n\n"
                 f"### SECURITY AUDIT FINDINGS:\n{sec_bullets}\n"
             )
 
@@ -243,6 +258,7 @@ class CompilerAgent:
                         {"role": "user", "content": user_prompt},
                     ],
                     original_code=current_code,
+                    language=lang,
                     temperature=0.1,
                 )
                 self.model = self.client.active_model
@@ -308,16 +324,16 @@ class CompilerAgent:
             if code_match:
                 candidate_code = code_match.group(1).strip()
             else:
-                fenced = re.search(r"```(?:cpp|c\+\+)?\s*(.*?)\s*```", response, re.DOTALL)
+                fenced = re.search(r"```(?:cpp|c\+\+|c|python|py|java)?\s*(.*?)\s*```", response, re.DOTALL)
                 candidate_code = fenced.group(1).strip() if fenced else current_code
 
             if candidate_code.startswith("```"):
-                candidate_code = re.sub(r"^```[a-zA-Z]*\n?", "", candidate_code)
+                candidate_code = re.sub(r"^```[a-zA-Z0-9_\-\+\.]*\n?", "", candidate_code)
             if candidate_code.endswith("```"):
                 candidate_code = re.sub(r"\n?```$", "", candidate_code)
 
             # ── Egress Guardrail: Check for Backdoors/Trojans in Patch ───────────
-            egress_check = self.guardrail.scan_egress(source_code, candidate_code)
+            egress_check = self.guardrail.scan_egress(source_code, candidate_code, language=lang)
             if egress_check.attack_detected:
                 if on_step:
                     on_step(
@@ -337,8 +353,8 @@ class CompilerAgent:
                 continue
 
             # ── Verification with Compiler & Security Tools ────────────────────
-            compile_res = compile_code(candidate_code, file_path)
-            security_res = security_audit(candidate_code, file_path, compile_res.get("errors"))
+            compile_res = compile_code(candidate_code, file_path, language=lang)
+            security_res = security_audit(candidate_code, file_path, compile_res.get("errors"), language=lang)
 
             passed_compile = compile_res["success"]
             passed_security = security_res["is_secure"]

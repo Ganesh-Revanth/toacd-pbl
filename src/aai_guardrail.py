@@ -135,10 +135,11 @@ class AAIGuardrail:
             latency_ms=elapsed,
         )
 
-    def scan_egress(self, original_code: str, candidate_patch: str) -> GuardrailResult:
+    def scan_egress(self, original_code: str, candidate_patch: str, language: Optional[Any] = None) -> GuardrailResult:
         """
-        Egress Filter: Inspects the generated C++ patch to verify the AI did not insert
-        covert data exfiltration trojans, unauthorized shell commands, or backdoor logic.
+        Egress Filter: Inspects the generated patch to verify the AI did not insert
+        covert data exfiltration trojans, unauthorized shell commands, backdoor logic,
+        or language-specific safety policy violations.
         """
         start_time = time.perf_counter()
 
@@ -176,6 +177,32 @@ class AAIGuardrail:
                     description=f"Generated code contains compiler security suppression directive: {attack_name}.",
                     trigger_pattern=match.group(0),
                     blocked_action="Rejected patch; forced re-synthesis with strict security.",
+                    latency_ms=elapsed,
+                )
+                self.log_attack("EGRESS", res, candidate_patch)
+                return res
+
+        # Language-aware safety check using language.is_safe()
+        lang_obj = None
+        if language is not None:
+            if isinstance(language, str):
+                from languages import get_language
+                lang_obj = get_language(language)
+            elif hasattr(language, "is_safe"):
+                lang_obj = language
+
+        if lang_obj is not None:
+            safe, reason = lang_obj.is_safe(candidate_patch)
+            if not safe:
+                elapsed = (time.perf_counter() - start_time) * 1000
+                res = GuardrailResult(
+                    is_safe=False,
+                    attack_detected=True,
+                    attack_type=f"Language Safety Violation ({lang_obj.name})",
+                    severity="CRITICAL",
+                    description=f"Generated patch violates {lang_obj.name} security policy: {reason}",
+                    trigger_pattern=reason,
+                    blocked_action="Rejected generated patch and prevented code replacement.",
                     latency_ms=elapsed,
                 )
                 self.log_attack("EGRESS", res, candidate_patch)
