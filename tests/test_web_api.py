@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from web import server  # noqa: E402
 
 HAS_GXX = shutil.which("g++") is not None
+HAS_CLANG = shutil.which("clang++") is not None
 
 MISSING_SEMICOLON = (
     "#include <iostream>\n"
@@ -126,6 +127,14 @@ class WebApiTests(unittest.TestCase):
     def test_cpp_analyze_clean_code(self):
         d = self.post("/api/cpp/analyze", {"code": "int main() { return 0; }"})[1]
         self.assertTrue(d["ok"])
+
+    @unittest.skipUnless(HAS_CLANG, "clang++ not installed")
+    def test_cpp_ast_produces_tree(self):
+        status, d = self.post("/api/cpp/ast", {"code": "int main() { int x = 42; return x; }"})
+        self.assertEqual(status, 200)
+        self.assertIn("tree", d)
+        self.assertGreater(len(d["tree"]), 0)
+        self.assertEqual(d["tree"][0]["type"], "FunctionDecl")
 
     @unittest.skipUnless(HAS_GXX, "g++ not installed")
     def test_heal_proposes_a_diff_and_does_not_apply_it(self):

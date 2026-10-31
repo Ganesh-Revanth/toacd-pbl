@@ -4,6 +4,7 @@
 const ROUTES = [
   { group: 'Work', items: [
     { id: 'workspace', label: 'C++ Studio', title: 'C++ Studio', render: pageWorkspace },
+    { id: 'ast', label: 'Syntax tree', title: 'Syntax tree', render: pageAst },
     { id: 'changes', label: 'Changes', title: 'Changes', render: pageChanges, badge: true },
   ] },
   { group: 'Evidence', items: [

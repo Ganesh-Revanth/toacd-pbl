@@ -187,7 +187,8 @@ A lightweight browser interface that reuses the existing Python modules with zer
 python src/web/server.py              # opens http://127.0.0.1:8765
 python src/web/server.py --no-browser --port 9000
 ```
-- **C++ Studio:** Includes full code editor, **Open / Save file**, **Compile** (invoking `g++`), **Run** (with stdout/stderr console), **Syntax tree tab** (interactive Clang AST explorer), **Diagnostics**, and **Review**.
+- **C++ Studio:** Includes full code editor, **Open / Save file**, **Compile** (invoking `g++`), **Compile & Run** (with stdin/stdout/stderr console), **Diagnostics**, and **Review**.
+- **Syntax Tree:** Dedicated sidebar page featuring an interactive node-and-edge SVG AST diagram (pan, zoom, fit, subtree collapse, node search, line-tracking with linked source viewer, and SVG export).
 - **Changes Page:** Review history of proposed patches with one-click Accept, Reject, or Undo.
 - **Benchmark & Architecture:** Live empirical figures loaded directly from `results/final.csv` and interactive hand-drawn SVG architecture diagrams.
 - **Safety Controls:**
