@@ -50,7 +50,7 @@ function StepsList(steps) {
   return el('ol', { class: 'steps', 'aria-label': 'What the healer tried' }, steps.map(st => {
     if (st.thought !== undefined) return el('li', null, el('span', { class: 'ok', text: '•' }), el('span', null, el('b', { text: 'Step ' + st.attempt + ': ' }), st.thought));
     return el('li', null,
-      el('span', { class: st.fixed ? 'ok' : 'no', text: st.fixed ? '✓' : '✕' }),
+      el('span', { class: st.fixed ? 'ok' : 'no' }, typeof icon === 'function' ? icon(st.fixed ? 'check' : 'x', { size: 12 }) : null),
       el('span', null, el('b', { text: 'Line ' + st.line + ': ' }), st.message || '', st.fixed ? ' — patched' : ' — ' + (st.note || 'not fixed')));
   }));
 }
@@ -87,14 +87,14 @@ function pageWorkspace(root) {
   const fileName = el('span', { class: 'file-name', text: s.filename });
   const btnCompile = el('button', { class: 'btn', title: 'Check the code with g++ (Ctrl+Shift+Enter)', onClick: () => runJob('compile') }, 'Compile');
   const btnRun = el('button', { class: 'btn primary run', title: 'Compile, then run the program (Ctrl+Enter)', onClick: () => runJob('run') },
-    el('span', { 'aria-hidden': 'true', text: '▶' }), 'Compile & Run');
+    icon('play'), 'Compile & Run');
   const itemRules = el('button', { class: 'menu-item', role: 'menuitem', onClick: (e) => { closeMenu(e); heal('rules'); } },
     el('b', { text: 'Rule-based fix' }), el('small', { text: 'Fast, works offline' }));
   const itemAI = el('button', { class: 'menu-item', role: 'menuitem', disabled: !aiOK, onClick: (e) => { closeMenu(e); heal('ai'); } },
     el('b', { text: 'AI fix (Gemini)' }), el('small', { text: aiOK ? 'Slower, handles harder errors' : 'Needs a Gemini API key' }));
   const closeMenu = (e) => { const d = e.target.closest('details'); if (d) d.open = false; };
   const fixMenu = el('details', { class: 'menu' },
-    el('summary', { class: 'btn', title: 'Propose a fix. Nothing changes until you accept.' }, 'Suggest fix ', el('span', { 'aria-hidden': 'true', text: '▾' })),
+    el('summary', { class: 'btn', title: 'Propose a fix. Nothing changes until you accept.' }, icon('sparkle'), ' Suggest fix ', icon('chevron-down')),
     el('div', { class: 'menu-pop', role: 'menu' }, itemRules, itemAI));
   const allButtons = () => [btnRun, btnCompile, itemRules, itemAI];
 
@@ -115,7 +115,7 @@ function pageWorkspace(root) {
   const btnSave = el('button', { class: 'btn', title: 'Download the code as a file', onClick: () => {
     const name = /\.[A-Za-z0-9+]+$/.test(s.filename) ? s.filename : s.filename + '.cpp';
     downloadText(name, ed.get()); s.baseline = ed.get(); announce('Saved ' + name);
-  } }, 'Save');
+  } }, icon('save'), 'Save');
 
   /* ── program input ── */
   const inputHint = el('span', { class: 'chip warn', hidden: true }, el('i'), 'Your program reads input');
@@ -130,6 +130,7 @@ function pageWorkspace(root) {
   const TABS = [['output', 'Output'], ['problems', 'Problems'], ['fix', 'Fix']];
   const tabBtn = {}, badge = {};
   const tabList = el('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Results' });
+  const indicator = el('div', { class: 'tab-indicator', 'aria-hidden': 'true' });
   const panel = el('div', { class: 'tabpanel results-body', role: 'tabpanel', tabindex: '0' });
   TABS.forEach(([id, label], i) => {
     badge[id] = el('span', { class: 'badge', hidden: true });
@@ -140,6 +141,18 @@ function pageWorkspace(root) {
     });
     tabBtn[id] = b; tabList.append(b);
   });
+  tabList.append(indicator);
+
+  function updateIndicator() {
+    const active = tabBtn[s.tab];
+    if (!active || !tabList.offsetParent) return;
+    const lRect = tabList.getBoundingClientRect();
+    const bRect = active.getBoundingClientRect();
+    const x = bRect.left - lRect.left + tabList.scrollLeft;
+    const w = bRect.width;
+    indicator.style.transform = `translateX(${x}px) scaleX(${w})`;
+  }
+  window.addEventListener('resize', updateIndicator);
 
   function renderResults() {
     const r = s.result;
@@ -150,6 +163,7 @@ function pageWorkspace(root) {
     badge.fix.hidden = !(s.pending && s.pending.status === 'pending'); badge.fix.textContent = '1'; badge.fix.className = 'badge ok';
     panel.setAttribute('aria-labelledby', 'rtab-' + s.tab);
     panel.replaceChildren(s.tab === 'problems' ? problemsView() : s.tab === 'fix' ? fixView() : outputView());
+    requestAnimationFrame(updateIndicator);
   }
 
   function markEditor(r) {
@@ -253,10 +267,10 @@ function pageWorkspace(root) {
       ed.set(s.code); ed.mark({});
       lastDecisionNote = notice('ok', el('b', { text: 'Change accepted. ' }), 'Editor updated. You can undo it from Changes.');
       announce('Change accepted'); runJob('compile');
-    } }, 'Accept change');
+    } }, icon('check'), 'Accept change');
     const reject = el('button', { class: 'btn', onClick: () => {
       decide(p, 'reject'); lastDecisionNote = notice('', 'Change rejected. Your code is unchanged.'); renderResults(); announce('Change rejected');
-    } }, 'Reject');
+    } }, icon('x'), 'Reject');
     parts.push(
       el('div', { class: 'run-meta' },
         el('span', { class: 'chip plain' }, p.kind),
@@ -334,7 +348,7 @@ function pageWorkspace(root) {
     el('div', { class: 'ws' },
       el('section', { class: 'panel ide', 'aria-label': 'Code editor' },
         el('div', { class: 'toolbar', role: 'toolbar', 'aria-label': 'Editor actions' },
-          el('span', { class: 'file-pill' }, el('span', { 'aria-hidden': 'true', text: '▤' }), fileName),
+          el('span', { class: 'file-pill' }, icon('file'), fileName),
           loader, picker, btnSave),
         editorWrap, stdinBox,
         el('div', { class: 'panel-foot' },
@@ -392,8 +406,13 @@ function pageChanges(root) {
       } }, p.status === 'pending' ? 'Hide diff' : 'Show diff');
       const act = el('div', { class: 'actions' }, toggle);
       const run = (action) => { const r = decide(p, action); if (!r.ok) { msg.replaceChildren(notice('bad', r.msg)); return; } render(); announce('Change ' + action); };
-      if (p.status === 'pending') act.append(el('button', { class: 'btn primary', onClick: () => run('accept') }, 'Accept'), el('button', { class: 'btn', onClick: () => run('reject') }, 'Reject'));
-      if (p.status === 'accepted') act.append(el('button', { class: 'btn', onClick: () => run('undo') }, 'Undo'));
+      if (p.status === 'pending') act.append(
+        el('button', { class: 'btn primary', onClick: () => run('accept') }, icon('check'), 'Accept'),
+        el('button', { class: 'btn', onClick: () => run('reject') }, icon('x'), 'Reject')
+      );
+      if (p.status === 'accepted') act.append(
+        el('button', { class: 'btn', onClick: () => run('undo') }, icon('undo'), 'Undo')
+      );
       host.append(el('article', { class: 'change' },
         el('div', { class: 'change-head' },
           el('div', null, el('h3', { text: p.kind }),

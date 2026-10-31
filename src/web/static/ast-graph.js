@@ -293,6 +293,8 @@ function ASTGraph(roots, opts = {}) {
   }
 
   draw();
+  canvas.classList.add('ag-enter');
+  setTimeout(() => canvas.classList.remove('ag-enter'), 400);
   // Fit once the stage has a real size (it is not in the document yet when this runs).
   const ro = new ResizeObserver(() => { if (size().w > 10) { fit(true); ro.disconnect(); } });
   ro.observe(canvas);

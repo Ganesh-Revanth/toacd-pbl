@@ -2,15 +2,28 @@
 /* pages-evidence.js — Benchmark results and Architecture (before / after). */
 
 /* ── Benchmark ───────────────────────────────────────────────────────── */
+function KPICard(label, num, unit) {
+  return el('div', { class: 'kpi-card' },
+    el('div', { class: 'kpi-label', text: label }),
+    el('div', { class: 'kpi-num' },
+      el('span', { class: 'bench-num', text: String(num) }),
+      unit ? el('span', { class: 'kpi-unit faint', text: ' ' + unit }) : null
+    )
+  );
+}
+
 function Bar(label, value, count, total, cls) {
   return el('div', { class: 'bar-row' },
     el('span', { text: label }),
     el('div', { class: 'bar-track', role: 'img', 'aria-label': label + ': ' + pct(value) }, el('div', { class: 'bar-fill ' + (cls || ''), style: 'width:' + (value || 0) + '%' })),
     el('span', { class: 'bar-val', text: pct(value) }));
 }
-const mark = (v) => v === 'yes' ? el('span', { class: 'mark y', 'aria-label': 'fixed', text: '✓' })
-  : v === 'no' ? el('span', { class: 'mark n', 'aria-label': 'not fixed', text: '✕' })
-  : el('span', { class: 'mark c', 'aria-label': 'not needed', text: '–' });
+
+const mark = (v) => v === 'yes'
+  ? el('span', { class: 'chip ok', 'aria-label': 'fixed' }, typeof icon === 'function' ? icon('check', { size: 12 }) : null, 'fixed')
+  : v === 'no'
+  ? el('span', { class: 'chip bad', 'aria-label': 'not fixed' }, typeof icon === 'function' ? icon('x', { size: 12 }) : null, 'miss')
+  : el('span', { class: 'chip plain', 'aria-label': 'clean' }, 'clean');
 
 async function pageBenchmark(root) {
   root.append(el('div', { class: 'page-head' }, el('div', null, el('h1', { text: 'Benchmark' }),
@@ -20,7 +33,15 @@ async function pageBenchmark(root) {
   try { b = await call('/api/benchmark'); } catch (e) { host.append(notice('bad', e.message)); return; }
   const h = b.healing;
 
+  const kpis = el('div', { class: 'kpi-grid' },
+    KPICard('Rule-based repair', h.rule_rate != null ? h.rule_rate.toFixed(1) : '—', '%'),
+    KPICard('Gemini agent repair', h.ai_rate != null ? h.ai_rate.toFixed(1) : '—', '%'),
+    KPICard('Broken fixtures', h.broken, 'files'),
+    KPICard('Classifier accuracy', h.classifier_accuracy != null ? h.classifier_accuracy.toFixed(1) : '—', '%')
+  );
+
   host.append(
+    kpis,
     el('p', { class: 'lede', text: 'Of ' + h.broken + ' C++ files that failed to compile, the rule-based healer fixed ' + h.rule_fixed + ' and the Gemini agent fixed ' + h.ai_fixed + '.' }),
     el('div', { class: 'bars' },
       Bar('Rule-based healer', h.rule_rate, h.rule_fixed, h.broken),

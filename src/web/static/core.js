@@ -67,7 +67,11 @@ async function busy(buttons, fn) {
   }
 }
 
-const notice = (kind, ...kids) => el('div', { class: 'notice ' + kind, role: kind === 'bad' ? 'alert' : 'status' }, ...kids);
+const notice = (kind, ...kids) => {
+  const iconName = kind === 'ok' ? 'check' : kind === 'warn' ? 'alert' : kind === 'bad' ? 'alert' : 'info';
+  const ic = el('span', { class: 'notice-icon', 'aria-hidden': 'true' }, typeof icon === 'function' ? icon(iconName) : null);
+  return el('div', { class: 'notice ' + (kind || 'plain'), role: kind === 'bad' ? 'alert' : 'status' }, ic, el('div', { class: 'notice-body' }, ...kids));
+};
 
 /* ── Persistent-ish state ────────────────────────────────────────────── */
 const store = {
@@ -163,16 +167,32 @@ const diffStats = (lines) => ({
 /* ── Tabs (keyboard accessible) ──────────────────────────────────────── */
 function Tabs(items, initial) {
   const list = el('div', { class: 'tabs', role: 'tablist' });
+  const indicator = el('div', { class: 'tab-indicator', 'aria-hidden': 'true' });
   const panel = el('div', { class: 'tabpanel', role: 'tabpanel', tabindex: '0' });
   let current = initial || items[0].id;
   const btns = {};
+
+  function updateIndicator() {
+    const active = btns[current];
+    if (!active || !list.offsetParent) return;
+    const lRect = list.getBoundingClientRect();
+    const bRect = active.getBoundingClientRect();
+    const x = bRect.left - lRect.left + list.scrollLeft;
+    const w = bRect.width;
+    indicator.style.transform = `translateX(${x}px) scaleX(${w})`;
+  }
+
   function select(id, focus) {
     current = id;
-    for (const it of items) btns[it.id].setAttribute('aria-selected', String(it.id === id)), btns[it.id].tabIndex = it.id === id ? 0 : -1;
+    for (const it of items) {
+      btns[it.id].setAttribute('aria-selected', String(it.id === id));
+      btns[it.id].tabIndex = it.id === id ? 0 : -1;
+    }
     const it = items.find(x => x.id === id);
     panel.replaceChildren(it.render());
     panel.setAttribute('aria-labelledby', 'tab-' + id);
     if (focus) btns[id].focus();
+    requestAnimationFrame(updateIndicator);
   }
   items.forEach((it, i) => {
     const b = el('button', { class: 'tab', role: 'tab', id: 'tab-' + it.id, onClick: () => select(it.id) }, it.label);
@@ -182,6 +202,8 @@ function Tabs(items, initial) {
     });
     btns[it.id] = b; list.append(b);
   });
+  list.append(indicator);
+  window.addEventListener('resize', updateIndicator);
   select(current);
   return { list, panel, select, refresh: () => select(current), get current() { return current; } };
 }
@@ -242,7 +264,7 @@ async function handleFile(file, onLoad, onError) {
 /** A button that opens the system file picker. */
 function FileLoader({ accept, label = 'Open file', onLoad, onError }) {
   const input = el('input', { type: 'file', accept, hidden: true, tabindex: '-1', 'aria-hidden': 'true' });
-  const btn = el('button', { class: 'btn', type: 'button', title: 'Open a file from your computer (or drop it on the editor)', onClick: () => input.click() }, label);
+  const btn = el('button', { class: 'btn', type: 'button', title: 'Open a file from your computer (or drop it on the editor)', onClick: () => input.click() }, typeof icon === 'function' ? icon('folder-open') : null, label);
   input.addEventListener('change', () => { const f = input.files[0]; input.value = ''; if (f) handleFile(f, onLoad, onError); });
   return el('span', { class: 'file-loader' }, btn, input);
 }

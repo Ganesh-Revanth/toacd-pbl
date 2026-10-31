@@ -150,7 +150,7 @@ function pageAst(root) {
           n.children.length ? el('div', null, el('dt', { text: 'In subtree' }), el('dd', { text: String(n.size) })) : null),
         path.length > 1 ? el('div', { class: 'ad-path', 'aria-label': 'Path from root' },
           path.map((p, i) => [
-            i ? el('span', { class: 'faint', 'aria-hidden': 'true', text: ' › ' }) : null,
+            i ? icon('chevron-right', { size: 12, cls: 'faint' }) : null,
             p === n ? el('b', { text: p.type }) : el('button', { class: 'linkish', text: p.type, onClick: () => graph && graph.select(p, { center: true }) })
           ])) : null
       );
@@ -176,18 +176,18 @@ function pageAst(root) {
       el('button', { 'aria-pressed': String(viewMode === 'graph'), onClick: () => setView('graph') }, 'Graph'),
       el('button', { 'aria-pressed': String(viewMode === 'list'), onClick: () => setView('list') }, 'List'));
     const segOrient = el('div', { class: 'seg', role: 'group', 'aria-label': 'Direction' },
-      el('button', { 'aria-pressed': String(orient === 'lr'), title: 'Root on the left', onClick: () => setOrient('lr') }, '→ Left-right'),
-      el('button', { 'aria-pressed': String(orient === 'td'), title: 'Root at the top', onClick: () => setOrient('td') }, '↓ Top-down'));
+      el('button', { 'aria-pressed': String(orient === 'lr'), title: 'Root on the left', onClick: () => setOrient('lr') }, icon('chevron-right'), ' Left-right'),
+      el('button', { 'aria-pressed': String(orient === 'td'), title: 'Root at the top', onClick: () => setOrient('td') }, icon('chevron-down'), ' Top-down'));
     const rolesBox = graph.hasRoles ? el('label', { class: 'check' }, el('input', { type: 'checkbox', checked: true, onChange: (e) => graph.setRoles(e.target.checked) }), 'Edge labels') : null;
     const btnExpand = el('button', { class: 'btn', onClick: () => viewMode === 'graph' ? graph.setAll(true) : list.setAll(true) }, 'Expand all');
     const btnCollapse = el('button', { class: 'btn', onClick: () => viewMode === 'graph' ? graph.setAll(false) : list.setAll(false) }, 'Collapse all');
     const zoom = el('div', { class: 'seg zoom', role: 'group', 'aria-label': 'Zoom' },
-      el('button', { 'aria-label': 'Zoom out', title: 'Zoom out', onClick: () => graph.zoomOut() }, '−'),
-      el('button', { title: 'Fit the whole tree in view', onClick: () => graph.fit(false) }, 'Fit'),
-      el('button', { 'aria-label': 'Zoom in', title: 'Zoom in', onClick: () => graph.zoomIn() }, '+'));
+      el('button', { 'aria-label': 'Zoom out', title: 'Zoom out', onClick: () => graph.zoomOut() }, icon('minus')),
+      el('button', { title: 'Fit the whole tree in view', onClick: () => graph.fit(false) }, icon('fit'), ' Fit'),
+      el('button', { 'aria-label': 'Zoom in', title: 'Zoom in', onClick: () => graph.zoomIn() }, icon('plus')));
     const btnExport = el('button', { class: 'btn', title: 'Download the diagram as an SVG image', onClick: () => {
       downloadText('syntax-tree.svg', graph.exportSvg(), 'image/svg+xml;charset=utf-8'); announce('Diagram saved');
-    } }, 'Export SVG');
+    } }, icon('download'), ' Export SVG');
     const graphOnly = [segOrient, rolesBox, zoom, btnExport].filter(Boolean);
 
     const legend = el('div', { class: 'ag-legend', 'aria-label': 'Colour key' },

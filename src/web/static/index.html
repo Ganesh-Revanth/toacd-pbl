@@ -4,10 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Green Compiler Studio</title>
+  <meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b0c11" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23881337' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='16 18 22 12 16 6'/%3E%3Cpolyline points='8 6 2 12 8 18'/%3E%3C/svg%3E">
+  <script>
+    (function() {
+      try {
+        var params = new URLSearchParams(window.location.search);
+        var tParam = params.get('theme');
+        var rParam = params.get('rail');
+        if (tParam) localStorage.setItem('theme', JSON.stringify(tParam));
+        if (rParam) localStorage.setItem('studio:rail', rParam);
+        var t = JSON.parse(localStorage.getItem('theme') || '"auto"');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+        var r = localStorage.getItem('studio:rail') || 'expanded';
+        document.documentElement.setAttribute('data-rail', r);
+      } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
+  <div id="backdrop" class="backdrop" aria-hidden="true"></div>
   <div class="app">
     <nav class="rail" id="rail" aria-label="Main"></nav>
     <div class="content">
@@ -17,7 +36,9 @@
     </div>
   </div>
   <div id="live" class="sr" aria-live="polite"></div>
+  <div id="tip" role="tooltip" class="tip" hidden></div>
   <script src="core.js"></script>
+  <script src="icons.js"></script>
   <script src="pages-cpp.js"></script>
   <script src="ast-graph.js"></script>
   <script src="tree.js"></script>
