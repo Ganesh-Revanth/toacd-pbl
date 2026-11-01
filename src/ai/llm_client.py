@@ -442,7 +442,8 @@ class LLMClient:
           3. Egress Guardrail scan on the generated patch
         """
         # ── 1. Ingress Guardrail Verification ─────────────────────────────────
-        prompt_text = "\n".join(m.get("content", "") for m in messages)
+        untrusted_parts = [m.get("content", "") for m in messages if m.get("role") != "system"]
+        prompt_text = "\n".join(untrusted_parts) if untrusted_parts else "\n".join(m.get("content", "") for m in messages)
         ingress_result = self.guardrail.scan_ingress(prompt_text)
         if ingress_result.attack_detected:
             raise GuardrailSecurityException(ingress_result, stage="INGRESS")
