@@ -445,7 +445,7 @@ class LLMClient:
         untrusted_parts = [m.get("content", "") for m in messages if m.get("role") != "system"]
         prompt_text = "\n".join(untrusted_parts) if untrusted_parts else "\n".join(m.get("content", "") for m in messages)
         ingress_result = self.guardrail.scan_ingress(prompt_text)
-        if ingress_result.attack_detected:
+        if ingress_result.decision == "BLOCK":
             raise GuardrailSecurityException(ingress_result, stage="INGRESS")
 
         # ── 2. Credential Validation ──────────────────────────────────────────
@@ -459,7 +459,7 @@ class LLMClient:
                 # Still verify cached response through Egress Guardrail for defense-in-depth
                 candidate_code = self._extract_candidate_code(cached_resp)
                 egress_result = self.guardrail.scan_egress(original_code, candidate_code, language=language)
-                if egress_result.attack_detected:
+                if egress_result.decision == "BLOCK":
                     raise GuardrailSecurityException(egress_result, stage="EGRESS")
                 return cached_resp
 
@@ -488,7 +488,7 @@ class LLMClient:
         # ── 4. Egress Guardrail Verification ──────────────────────────────────
         candidate_code = self._extract_candidate_code(response_text)
         egress_result = self.guardrail.scan_egress(original_code, candidate_code, language=language)
-        if egress_result.attack_detected:
+        if egress_result.decision == "BLOCK":
             raise GuardrailSecurityException(egress_result, stage="EGRESS")
 
         # ── 5. Cache Write ────────────────────────────────────────────────────

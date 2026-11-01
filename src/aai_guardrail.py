@@ -36,7 +36,7 @@ import string
 import sys
 import time
 import unicodedata
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple, Set
 
@@ -59,6 +59,168 @@ DATA_DIR = os.path.join(ROOT_DIR, "data", "aai")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# RISK SCORING ENGINE & DECISION THRESHOLDS
+# ──────────────────────────────────────────────────────────────────────────────
+
+GUARDRAIL_THRESHOLDS: Dict[str, float] = {
+    "ALLOW": 30.0,       # score < 30 -> ALLOW
+    "REVIEW": 70.0,      # 30 <= score < 70 -> REVIEW
+    "BLOCK": 70.0,       # score >= 70 -> BLOCK
+    "allow_max": 29.99,
+    "review_min": 30.0,
+    "review_max": 69.99,
+    "block_min": 70.0,
+}
+
+SEVERITY_WEIGHTS: Dict[str, float] = {
+    "CRITICAL": 75.0,
+    "HIGH": 65.0,
+    "MEDIUM": 25.0,
+    "LOW": 10.0,
+    "CLEAN": 0.0,
+}
+
+STAGE_WEIGHTS: Dict[str, float] = {
+    "egress": 15.0,
+    "tool": 12.0,
+    "ingress": 5.0,
+    "output": 5.0,
+    "auxiliary": 0.0,
+}
+
+
+def categorize_finding(attack_name: Optional[str], layer: str = "RULE") -> List[str]:
+    """Maps finding descriptions or violation types to standard security categories."""
+    cats = set()
+    if not attack_name:
+        if layer == "ML":
+            return ["prompt_injection"]
+        elif layer == "CODE":
+            return ["trojan_backdoor"]
+        elif layer == "SCOPE":
+            return ["tool_abuse"]
+        return []
+
+    low = attack_name.lower()
+    if any(k in low for k in ("prompt injection", "jailbreak", "persona", "directive", "context reset", "dan")):
+        cats.add("prompt_injection")
+    if any(k in low for k in ("policy bypass", "integrity tampering", "rule override", "tool suppression")):
+        cats.add("policy_bypass")
+    if any(k in low for k in ("trojan", "backdoor", "command execution", "reverse shell", "socket", "dynamic code", "function pointer", "macro injection", "token violation")):
+        cats.add("trojan_backdoor")
+    if any(k in low for k in ("personal data", "credential", "ssh", "registry", "cookie", "browser", "shadow", "passwd", "history")):
+        cats.add("credential_harvesting")
+    if any(k in low for k in ("weakening", "check deletion", "assertion", "boundary", "locality drift")):
+        cats.add("silent_weakening")
+    if any(k in low for k in ("resource abuse", "fork bomb", "threadbomb")):
+        cats.add("resource_abuse")
+    if any(k in low for k in ("scope", "tool", "traversal", "shell metacharacters", "include", "import", "filename")):
+        cats.add("tool_abuse")
+    if any(k in low for k in ("delimiter", "poisoning", "override tag", "fake delimiter")):
+        cats.add("eval_poisoning")
+    if any(k in low for k in ("language safety", "safety policy")):
+        cats.add("trojan_backdoor")
+        cats.add("policy_bypass")
+
+    if not cats:
+        if layer == "ML":
+            cats.add("prompt_injection")
+        elif layer == "CODE":
+            cats.add("trojan_backdoor")
+        elif layer == "SCOPE":
+            cats.add("tool_abuse")
+        else:
+            cats.add("policy_bypass")
+
+    return sorted(list(cats))
+
+
+def compute_risk(
+    rule_severity: Optional[str] = None,
+    ml_probability: float = 0.0,
+    layers_fired: Optional[List[str]] = None,
+    stage: str = "ingress",
+    obfuscations_detected: Optional[List[str]] = None,
+) -> Tuple[float, str, str, str]:
+    """
+    Computes risk score (0-100), risk level (LOW/MEDIUM/HIGH/CRITICAL),
+    decision (ALLOW/REVIEW/BLOCK), and action_taken description.
+    Risk is a weighted combination of:
+      1. Rule severity (CRITICAL: 75, HIGH: 65, MEDIUM: 25, LOW: 10)
+      2. ML calibrated probability
+      3. Consensus across independent layers that fired
+      4. Stage penalty (egress and tool are penalized worse than ingress)
+      5. Obfuscation detected (homoglyphs, zero-width, base64, split strings)
+    Thresholds:
+      < 30    -> ALLOW
+      30 - 69 -> REVIEW
+      >= 70   -> BLOCK
+    """
+    sev_weight = SEVERITY_WEIGHTS.get((rule_severity or "").upper(), 0.0)
+
+    # ML probability contribution
+    if ml_probability >= 0.85:
+        ml_weight = 70.0
+    elif ml_probability >= 0.70:
+        ml_weight = 50.0
+    elif ml_probability >= 0.55:
+        ml_weight = 20.0
+    else:
+        ml_weight = 0.0
+
+    # Layer consensus
+    n_layers = len(set(layers_fired or []))
+    if n_layers >= 3:
+        layer_weight = 18.0
+    elif n_layers == 2:
+        layer_weight = 10.0
+    else:
+        layer_weight = 0.0
+
+    # Obfuscation penalty
+    obf_penalty = 0.0
+    for obf in (obfuscations_detected or []):
+        if obf in ("base64", "hex", "rot13"):
+            obf_penalty += 12.0
+        elif obf in ("homoglyph", "zero_width"):
+            obf_penalty += 10.0
+        elif obf in ("leet", "split"):
+            obf_penalty += 8.0
+        else:
+            obf_penalty += 5.0
+    obf_penalty = min(25.0, obf_penalty)
+
+    # Stage penalty (only if suspicious indicator fired)
+    has_indicators = (sev_weight > 0) or (ml_weight >= 15.0) or (obf_penalty > 0)
+    if has_indicators:
+        stage_penalty = STAGE_WEIGHTS.get(stage.lower(), 5.0)
+    else:
+        stage_penalty = 0.0
+
+    raw_score = sev_weight + ml_weight + layer_weight + stage_penalty + obf_penalty
+    risk_score = round(min(100.0, max(0.0, raw_score)), 1)
+
+    # Decision from config dict
+    block_threshold = GUARDRAIL_THRESHOLDS.get("block_min", 70.0)
+    review_threshold = GUARDRAIL_THRESHOLDS.get("review_min", 30.0)
+
+    if risk_score >= block_threshold:
+        decision = "BLOCK"
+        risk_level = "CRITICAL"
+        action_taken = f"Blocked execution: critical security violation (risk score {risk_score:.1f} >= {block_threshold:.0f})."
+    elif risk_score >= review_threshold:
+        decision = "REVIEW"
+        risk_level = "HIGH" if risk_score >= 50.0 else "MEDIUM"
+        action_taken = f"Review required: suspicious indicators detected (risk score {risk_score:.1f} in 30-69 band). User acceptance required."
+    else:
+        decision = "ALLOW"
+        risk_level = "LOW"
+        action_taken = f"Execution allowed: clean profile (risk score {risk_score:.1f} < {review_threshold:.0f})."
+
+    return risk_score, risk_level, decision, action_taken
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # DATA STRUCTURES
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -74,6 +236,38 @@ class GuardrailResult:
     latency_ms: float = 0.0
     layer: str = "RULE"  # NORMALIZE, RULE, CODE, ML, SCOPE, AUXILIARY
     confidence: float = 1.0
+    risk_score: float = 0.0  # 0 - 100
+    risk_level: str = "LOW"  # LOW, MEDIUM, HIGH, CRITICAL
+    categories: List[str] = field(default_factory=list)  # e.g. ["prompt_injection", "policy_bypass"]
+    evidence: List[Dict[str, Any]] = field(default_factory=list)  # list of {layer, rule, snippet}
+    decision: str = "ALLOW"  # ALLOW, REVIEW, BLOCK
+    action_taken: str = ""  # text description of action taken
+
+    def __post_init__(self):
+        if not self.categories and self.attack_type:
+            self.categories = categorize_finding(self.attack_type, self.layer)
+        if self.attack_detected and self.decision == "ALLOW":
+            if self.severity in ("CRITICAL", "HIGH"):
+                self.decision = "BLOCK"
+                self.risk_level = self.severity
+                self.risk_score = 75.0 if self.severity == "CRITICAL" else 65.0
+            elif self.severity == "MEDIUM":
+                self.decision = "REVIEW"
+                self.risk_level = "MEDIUM"
+                self.risk_score = 45.0
+            else:
+                self.decision = "ALLOW"
+                self.risk_level = "LOW"
+                self.risk_score = 20.0
+        if not self.action_taken:
+            if self.decision == "BLOCK":
+                self.action_taken = self.blocked_action or f"Blocked execution: {self.attack_type or 'critical security violation'}."
+            elif self.decision == "REVIEW":
+                self.action_taken = "Review required: flagged suspicious constructs."
+            else:
+                self.action_taken = "Execution allowed: input and patch verified clean."
+        if not self.evidence and (self.trigger_pattern or self.attack_type):
+            self.evidence = [{"layer": self.layer, "rule": self.attack_type or "Violation", "snippet": str(self.trigger_pattern or "")[:80]}]
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -186,6 +380,62 @@ def normalize(text: str) -> str:
     # 9. Collapse whitespace
     res = re.sub(r'[ \t\f\v]+', ' ', res)
     return res
+
+
+def detect_obfuscations(raw_text: str) -> List[Tuple[str, str]]:
+    """
+    Detects obfuscation techniques present in input text.
+    Returns list of (obfuscation_type, snippet).
+    """
+    detected: List[Tuple[str, str]] = []
+    if not raw_text:
+        return detected
+
+    # 1. Zero-width and bidi characters
+    zw_matches = ZERO_WIDTH_AND_BIDI_REGEX.findall(raw_text)
+    if zw_matches:
+        detected.append(("zero_width", f"Found {len(zw_matches)} zero-width/bidi control character(s)"))
+
+    # 2. Homoglyphs
+    homo_chars = [ch for ch in raw_text if ch in HOMOGLYPH_MAP]
+    if homo_chars:
+        sample_chars = "".join(homo_chars[:10])
+        detected.append(("homoglyph", f"Found homoglyph character(s): {sample_chars}"))
+
+    # 3. Base64
+    b64_pattern = re.compile(
+        r'(?:(?:b64decode|atob)\s*\(\s*["\']([A-Za-z0-9+/=]{12,})["\']\)|\[BASE64_[A-Z_]+\]:\s*([A-Za-z0-9+/=]{12,}))'
+    )
+    b64_m = b64_pattern.search(raw_text)
+    if b64_m:
+        val = b64_m.group(1) or b64_m.group(2)
+        detected.append(("base64", f"Base64 encoded fragment: {val[:30]}"))
+
+    # 4. Hex escapes (\x69\x67...)
+    hex_m = re.search(r'(?:\\x[0-9a-fA-F]{2}){3,}', raw_text)
+    if hex_m:
+        detected.append(("hex", f"Hex escapes: {hex_m.group(0)[:30]}"))
+
+    # 5. Split string literals ("sys" + "tem" or "sys" "tem")
+    if re.search(r'["\']\s+["\']', raw_text) or re.search(r'["\']\s*\+\s*["\']', raw_text):
+        detected.append(("split", "Split string literal concatenation"))
+
+    # 6. Leetspeak
+    leet_suspects = [r"1gn0r3", r"p0w3rsh3ll", r"syst3m", r"byp4ss", r"s3cur1ty"]
+    for lpat in leet_suspects:
+        if re.search(lpat, raw_text, re.IGNORECASE):
+            detected.append(("leet", f"Leetspeak pattern: {lpat}"))
+            break
+
+    # 7. ROT13
+    try:
+        r13 = codecs.decode(raw_text, 'rot_13')
+        if any(kw in r13.lower() for kw in ("ignore", "system(", "powershell", "curl http", "disable validation")):
+            detected.append(("rot13", "ROT13 encoded attack keywords"))
+    except Exception:
+        pass
+
+    return detected
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -751,56 +1001,68 @@ class AAIGuardrail:
         """
         Inspects prompts, code comments, and strings before passing to LLM.
         Applies Normalization -> Rules -> ML Classifier.
+        Computes risk score, risk level, categories, evidence, decision, and action_taken.
         """
         start_time = time.perf_counter()
 
-        # Step 1: Normalize input to defeat homoglyphs, zero-width, leet, base64, split strings
+        # Step 1: Detect obfuscations & normalize
+        obfuscations = detect_obfuscations(text_or_code)
         norm_text = normalize(text_or_code)
         if "You are an expert Autonomous" in norm_text:
             norm_text = re.sub(r"(?is)You are an expert Autonomous.*?Available tools:[^\n]*\n?", "", norm_text)
 
+        evidence: List[Dict[str, Any]] = []
+        for obf_type, obf_snip in obfuscations:
+            evidence.append({
+                "layer": "NORMALIZE",
+                "rule": f"Obfuscation ({obf_type})",
+                "snippet": obf_snip[:80],
+            })
+
+        matched_rule = None
+        matched_snippet = None
+        severity = "LOW"
+        attack_name = None
+        layers_fired: List[str] = []
+        if obfuscations:
+            layers_fired.append("NORMALIZE")
+
         # Step 2: Check Rule Layer on both original and normalized text
         # (A) Ingress Injection Rules
-        for pattern, attack_name, severity in RuleMatcher.INGRESS_RULES:
+        for pattern, r_name, r_sev in RuleMatcher.INGRESS_RULES:
             match = re.search(pattern, text_or_code) or re.search(pattern, norm_text)
             if match:
-                elapsed = (time.perf_counter() - start_time) * 1000
-                res = GuardrailResult(
-                    is_safe=False,
-                    attack_detected=True,
-                    attack_type=f"Prompt Injection: {attack_name}",
-                    severity=severity,
-                    description=f"Detected adversarial injection attempting to {attack_name.lower()}.",
-                    trigger_pattern=match.group(0)[:80],
-                    blocked_action="Blocked agent execution before invoking LLM reasoning.",
-                    latency_ms=elapsed,
-                    layer="RULE",
-                    confidence=1.0,
-                )
-                self.log_attack("INGRESS", res, text_or_code)
-                return res
+                matched_rule = match
+                matched_snippet = match.group(0)[:80]
+                severity = r_sev
+                attack_name = f"Prompt Injection: {r_name}"
+                layers_fired.append("RULE")
+                evidence.append({
+                    "layer": "RULE",
+                    "rule": attack_name,
+                    "snippet": matched_snippet,
+                })
+                break
 
-        # (B) Personal Data Access Rules (e.g. prompt directing access to ~/.ssh, registry, cookies)
-        for pattern, attack_name, severity in RuleMatcher.PERSONAL_DATA_RULES:
-            match = re.search(pattern, text_or_code) or re.search(pattern, norm_text)
-            if match:
-                elapsed = (time.perf_counter() - start_time) * 1000
-                res = GuardrailResult(
-                    is_safe=False,
-                    attack_detected=True,
-                    attack_type=f"Data Access Violation: {attack_name}",
-                    severity=severity,
-                    description=f"Detected attempt to access restricted personal or credential resource: {attack_name}.",
-                    trigger_pattern=match.group(0)[:80],
-                    blocked_action="Blocked prompt execution and logged security alert.",
-                    latency_ms=elapsed,
-                    layer="RULE",
-                    confidence=1.0,
-                )
-                self.log_attack("INGRESS", res, text_or_code)
-                return res
+        # (B) Personal Data Access Rules
+        if not matched_rule:
+            for pattern, r_name, r_sev in RuleMatcher.PERSONAL_DATA_RULES:
+                match = re.search(pattern, text_or_code) or re.search(pattern, norm_text)
+                if match:
+                    matched_rule = match
+                    matched_snippet = match.group(0)[:80]
+                    severity = r_sev
+                    attack_name = f"Data Access Violation: {r_name}"
+                    layers_fired.append("RULE")
+                    evidence.append({
+                        "layer": "RULE",
+                        "rule": attack_name,
+                        "snippet": matched_snippet,
+                    })
+                    break
 
-        # Step 3: ML Layer (Inference on normalized text)
+        # Step 3: ML Layer
+        ml_prob = 0.0
         if self.ml_classifier:
             ml_input = re.sub(
                 r"(?i)you\s+are\s+an\s+expert\s+autonomous\s+[\w\+\s]+\s+compiler\s+and\s+security\s+agent[^\n]*\n?",
@@ -808,24 +1070,58 @@ class AAIGuardrail:
                 norm_text
             )
             ml_prob = self.ml_classifier.predict_probability(ml_input)
-            if ml_prob >= 0.75:
-                elapsed = (time.perf_counter() - start_time) * 1000
-                res = GuardrailResult(
-                    is_safe=False,
-                    attack_detected=True,
-                    attack_type="ML Detected Adversarial Injection",
-                    severity="HIGH",
-                    description=f"ML text classifier flagged adversarial injection pattern with {ml_prob:.1%} confidence.",
-                    trigger_pattern=norm_text[:60].replace("\n", " "),
-                    blocked_action="Blocked input by ML classifier confidence threshold.",
-                    latency_ms=elapsed,
-                    layer="ML",
-                    confidence=ml_prob,
-                )
-                self.log_attack("INGRESS", res, text_or_code)
-                return res
+            if ml_prob >= 0.65:
+                layers_fired.append("ML")
+                evidence.append({
+                    "layer": "ML",
+                    "rule": "Adversarial Injection Classifier",
+                    "snippet": f"P(attack) = {ml_prob:.4f}",
+                })
+                if not attack_name and ml_prob >= 0.75:
+                    attack_name = "ML Detected Adversarial Injection"
+                    severity = "HIGH"
+                    matched_snippet = norm_text[:60].replace("\n", " ")
+
+        # Compute risk
+        obf_types = [o[0] for o in obfuscations]
+        has_rule_or_high_ml = bool(matched_rule or (self.ml_classifier and ml_prob >= 0.75))
+        risk_score, risk_level, decision, action_taken = compute_risk(
+            rule_severity=severity if has_rule_or_high_ml else None,
+            ml_probability=ml_prob,
+            layers_fired=layers_fired,
+            stage="ingress",
+            obfuscations_detected=obf_types,
+        )
+
+        categories = categorize_finding(attack_name, "RULE" if matched_rule else ("ML" if ml_prob >= 0.75 else "RULE"))
+        if obf_types and "obfuscation" not in categories:
+            categories.append("obfuscation")
+            categories.sort()
 
         elapsed = (time.perf_counter() - start_time) * 1000
+
+        if decision in ("BLOCK", "REVIEW"):
+            res = GuardrailResult(
+                is_safe=False,
+                attack_detected=True,
+                attack_type=attack_name or ("Suspicious Adversarial Input" if decision == "REVIEW" else "Prompt Injection"),
+                severity=severity if severity != "LOW" else ("MEDIUM" if decision == "REVIEW" else "CRITICAL"),
+                description=f"Adversarial input flagged: {attack_name or 'suspicious pattern'} (Risk: {risk_score:.1f}, Decision: {decision}).",
+                trigger_pattern=matched_snippet or (obfuscations[0][1] if obfuscations else norm_text[:60]),
+                blocked_action=action_taken,
+                latency_ms=elapsed,
+                layer=layers_fired[0] if layers_fired else "RULE",
+                confidence=ml_prob if ("ML" in layers_fired and not matched_rule) else 1.0,
+                risk_score=risk_score,
+                risk_level=risk_level,
+                categories=categories,
+                evidence=evidence,
+                decision=decision,
+                action_taken=action_taken,
+            )
+            self.log_attack("INGRESS", res, text_or_code)
+            return res
+
         return GuardrailResult(
             is_safe=True,
             attack_detected=False,
@@ -834,6 +1130,12 @@ class AAIGuardrail:
             latency_ms=elapsed,
             layer="RULE",
             confidence=1.0,
+            risk_score=risk_score,
+            risk_level=risk_level,
+            categories=[],
+            evidence=evidence,
+            decision="ALLOW",
+            action_taken=action_taken,
         )
 
     # ── 2. Egress Scan ────────────────────────────────────────────────────────
@@ -854,6 +1156,7 @@ class AAIGuardrail:
           5. Code-level tokenizer/AST inspection for Python, C/C++, Java.
         """
         start_time = time.perf_counter()
+        evidence: List[Dict[str, Any]] = []
 
         # Step 1: Language-aware safety policy check using language.is_safe()
         lang_obj = None
@@ -869,16 +1172,33 @@ class AAIGuardrail:
             safe, reason = lang_obj.is_safe(candidate_patch)
             if not safe and (orig_safe or not original_code.strip() or original_code == "int main() { return 0; }"):
                 elapsed = (time.perf_counter() - start_time) * 1000
+                attack_type = f"Language Safety Violation ({lang_obj.name})"
+                risk_score, risk_level, decision, action_taken = compute_risk(
+                    rule_severity="CRITICAL",
+                    stage="egress",
+                    layers_fired=["CODE"],
+                )
+                evidence.append({
+                    "layer": "CODE",
+                    "rule": attack_type,
+                    "snippet": reason[:80],
+                })
                 res = GuardrailResult(
                     is_safe=False,
                     attack_detected=True,
-                    attack_type=f"Language Safety Violation ({lang_obj.name})",
+                    attack_type=attack_type,
                     severity="CRITICAL",
                     description=f"Generated patch violates {lang_obj.name} security policy: {reason}",
                     trigger_pattern=reason,
-                    blocked_action="Rejected generated patch and prevented code replacement.",
+                    blocked_action=action_taken,
                     latency_ms=elapsed,
                     layer="CODE",
+                    risk_score=risk_score,
+                    risk_level=risk_level,
+                    categories=categorize_finding(attack_type, "CODE"),
+                    evidence=evidence,
+                    decision=decision,
+                    action_taken=action_taken,
                 )
                 self.log_attack("EGRESS", res, candidate_patch)
                 return res
@@ -887,16 +1207,33 @@ class AAIGuardrail:
         weakening_reason = CodeSecurityInspector.check_silent_weakening(original_code, candidate_patch)
         if weakening_reason:
             elapsed = (time.perf_counter() - start_time) * 1000
+            attack_type = "Silent Weakening / Security Check Deletion"
+            risk_score, risk_level, decision, action_taken = compute_risk(
+                rule_severity="CRITICAL",
+                stage="egress",
+                layers_fired=["CODE"],
+            )
+            evidence.append({
+                "layer": "CODE",
+                "rule": attack_type,
+                "snippet": weakening_reason[:80],
+            })
             res = GuardrailResult(
                 is_safe=False,
                 attack_detected=True,
-                attack_type="Silent Weakening / Security Check Deletion",
+                attack_type=attack_type,
                 severity="CRITICAL",
                 description=weakening_reason,
                 trigger_pattern=weakening_reason[:60],
-                blocked_action="Rejected generated patch to preserve code safety invariant.",
+                blocked_action=action_taken,
                 latency_ms=elapsed,
                 layer="CODE",
+                risk_score=risk_score,
+                risk_level=risk_level,
+                categories=categorize_finding(attack_type, "CODE"),
+                evidence=evidence,
+                decision=decision,
+                action_taken=action_taken,
             )
             self.log_attack("EGRESS", res, candidate_patch)
             return res
@@ -906,16 +1243,33 @@ class AAIGuardrail:
             locality_err = CodeSecurityInspector.check_locality_drift(original_code, candidate_patch, diagnostic_line)
             if locality_err:
                 elapsed = (time.perf_counter() - start_time) * 1000
+                attack_type = "Locality Drift Violation"
+                risk_score, risk_level, decision, action_taken = compute_risk(
+                    rule_severity="MEDIUM",
+                    stage="egress",
+                    layers_fired=["CODE"],
+                )
+                evidence.append({
+                    "layer": "CODE",
+                    "rule": attack_type,
+                    "snippet": locality_err[:80],
+                })
                 res = GuardrailResult(
                     is_safe=False,
                     attack_detected=True,
-                    attack_type="Locality Drift Violation",
+                    attack_type=attack_type,
                     severity="MEDIUM",
                     description=locality_err,
                     trigger_pattern=f"Diagnostic line {diagnostic_line}",
-                    blocked_action="Rejected patch touching distant unrelated code regions.",
+                    blocked_action=action_taken,
                     latency_ms=elapsed,
                     layer="CODE",
+                    risk_score=risk_score,
+                    risk_level=risk_level,
+                    categories=categorize_finding(attack_type, "CODE"),
+                    evidence=evidence,
+                    decision=decision,
+                    action_taken=action_taken,
                 )
                 self.log_attack("EGRESS", res, candidate_patch)
                 return res
@@ -929,16 +1283,33 @@ class AAIGuardrail:
                 # Only flag if construct is NEW in patch or is CRITICAL
                 if matched_snippet not in original_code or severity == "CRITICAL":
                     elapsed = (time.perf_counter() - start_time) * 1000
+                    full_attack = f"Trojan/Backdoor: {attack_name}"
+                    risk_score, risk_level, decision, action_taken = compute_risk(
+                        rule_severity=severity,
+                        stage="egress",
+                        layers_fired=["RULE"],
+                    )
+                    evidence.append({
+                        "layer": "RULE",
+                        "rule": full_attack,
+                        "snippet": matched_snippet[:80],
+                    })
                     res = GuardrailResult(
                         is_safe=False,
                         attack_detected=True,
-                        attack_type=f"Trojan/Backdoor: {attack_name}",
+                        attack_type=full_attack,
                         severity=severity,
                         description=f"Generated code introduced covert security hazard: {attack_name}.",
                         trigger_pattern=matched_snippet[:60],
-                        blocked_action="Rejected generated patch and prevented code replacement.",
+                        blocked_action=action_taken,
                         latency_ms=elapsed,
                         layer="RULE",
+                        risk_score=risk_score,
+                        risk_level=risk_level,
+                        categories=categorize_finding(full_attack, "RULE"),
+                        evidence=evidence,
+                        decision=decision,
+                        action_taken=action_taken,
                     )
                     self.log_attack("EGRESS", res, candidate_patch)
                     return res
@@ -948,16 +1319,33 @@ class AAIGuardrail:
             match = re.search(pattern, candidate_patch) or re.search(pattern, norm_patch)
             if match and match.group(0) not in original_code:
                 elapsed = (time.perf_counter() - start_time) * 1000
+                full_attack = f"Personal Data Access: {attack_name}"
+                risk_score, risk_level, decision, action_taken = compute_risk(
+                    rule_severity=severity,
+                    stage="egress",
+                    layers_fired=["RULE"],
+                )
+                evidence.append({
+                    "layer": "RULE",
+                    "rule": full_attack,
+                    "snippet": match.group(0)[:80],
+                })
                 res = GuardrailResult(
                     is_safe=False,
                     attack_detected=True,
-                    attack_type=f"Personal Data Access: {attack_name}",
+                    attack_type=full_attack,
                     severity=severity,
                     description=f"Generated patch introduces personal credential/data access: {attack_name}.",
                     trigger_pattern=match.group(0)[:60],
-                    blocked_action="Rejected generated patch.",
+                    blocked_action=action_taken,
                     latency_ms=elapsed,
                     layer="RULE",
+                    risk_score=risk_score,
+                    risk_level=risk_level,
+                    categories=categorize_finding(full_attack, "RULE"),
+                    evidence=evidence,
+                    decision=decision,
+                    action_taken=action_taken,
                 )
                 self.log_attack("EGRESS", res, candidate_patch)
                 return res
@@ -969,16 +1357,33 @@ class AAIGuardrail:
             for v_name, v_pattern, v_sev in ast_violations:
                 if v_pattern not in original_code:
                     elapsed = (time.perf_counter() - start_time) * 1000
+                    full_attack = f"Python AST Violation: {v_name}"
+                    risk_score, risk_level, decision, action_taken = compute_risk(
+                        rule_severity=v_sev,
+                        stage="egress",
+                        layers_fired=["CODE"],
+                    )
+                    evidence.append({
+                        "layer": "CODE",
+                        "rule": full_attack,
+                        "snippet": v_pattern[:80],
+                    })
                     res = GuardrailResult(
                         is_safe=False,
                         attack_detected=True,
-                        attack_type=f"Python AST Violation: {v_name}",
+                        attack_type=full_attack,
                         severity=v_sev,
                         description=f"Python AST analysis flagged hazardous construct: {v_name}.",
                         trigger_pattern=v_pattern,
-                        blocked_action="Rejected generated Python patch.",
+                        blocked_action=action_taken,
                         latency_ms=elapsed,
                         layer="CODE",
+                        risk_score=risk_score,
+                        risk_level=risk_level,
+                        categories=categorize_finding(full_attack, "CODE"),
+                        evidence=evidence,
+                        decision=decision,
+                        action_taken=action_taken,
                     )
                     self.log_attack("EGRESS", res, candidate_patch)
                     return res
@@ -987,16 +1392,33 @@ class AAIGuardrail:
             for v_name, v_pattern, v_sev in cpp_violations:
                 if v_pattern not in original_code:
                     elapsed = (time.perf_counter() - start_time) * 1000
+                    full_attack = f"C++ Token Violation: {v_name}"
+                    risk_score, risk_level, decision, action_taken = compute_risk(
+                        rule_severity=v_sev,
+                        stage="egress",
+                        layers_fired=["CODE"],
+                    )
+                    evidence.append({
+                        "layer": "CODE",
+                        "rule": full_attack,
+                        "snippet": v_pattern[:80],
+                    })
                     res = GuardrailResult(
                         is_safe=False,
                         attack_detected=True,
-                        attack_type=f"C++ Token Violation: {v_name}",
+                        attack_type=full_attack,
                         severity=v_sev,
                         description=f"C/C++ inspection flagged hazardous construct: {v_name}.",
                         trigger_pattern=v_pattern,
-                        blocked_action="Rejected generated C/C++ patch.",
+                        blocked_action=action_taken,
                         latency_ms=elapsed,
                         layer="CODE",
+                        risk_score=risk_score,
+                        risk_level=risk_level,
+                        categories=categorize_finding(full_attack, "CODE"),
+                        evidence=evidence,
+                        decision=decision,
+                        action_taken=action_taken,
                     )
                     self.log_attack("EGRESS", res, candidate_patch)
                     return res
@@ -1005,21 +1427,39 @@ class AAIGuardrail:
             for v_name, v_pattern, v_sev in java_violations:
                 if v_pattern not in original_code:
                     elapsed = (time.perf_counter() - start_time) * 1000
+                    full_attack = f"Java Token Violation: {v_name}"
+                    risk_score, risk_level, decision, action_taken = compute_risk(
+                        rule_severity=v_sev,
+                        stage="egress",
+                        layers_fired=["CODE"],
+                    )
+                    evidence.append({
+                        "layer": "CODE",
+                        "rule": full_attack,
+                        "snippet": v_pattern[:80],
+                    })
                     res = GuardrailResult(
                         is_safe=False,
                         attack_detected=True,
-                        attack_type=f"Java Token Violation: {v_name}",
+                        attack_type=full_attack,
                         severity=v_sev,
                         description=f"Java token inspection flagged hazardous construct: {v_name}.",
                         trigger_pattern=v_pattern,
-                        blocked_action="Rejected generated Java patch.",
+                        blocked_action=action_taken,
                         latency_ms=elapsed,
                         layer="CODE",
+                        risk_score=risk_score,
+                        risk_level=risk_level,
+                        categories=categorize_finding(full_attack, "CODE"),
+                        evidence=evidence,
+                        decision=decision,
+                        action_taken=action_taken,
                     )
                     self.log_attack("EGRESS", res, candidate_patch)
                     return res
 
         elapsed = (time.perf_counter() - start_time) * 1000
+        risk_score, risk_level, decision, action_taken = compute_risk(None, stage="egress")
         return GuardrailResult(
             is_safe=True,
             attack_detected=False,
@@ -1028,6 +1468,12 @@ class AAIGuardrail:
             latency_ms=elapsed,
             layer="CODE",
             confidence=1.0,
+            risk_score=risk_score,
+            risk_level=risk_level,
+            categories=[],
+            evidence=evidence,
+            decision="ALLOW",
+            action_taken=action_taken,
         )
 
     # ── 3. Tool & Execution Scope Validation ──────────────────────────────────
@@ -1044,20 +1490,33 @@ class AAIGuardrail:
         elapsed = (time.perf_counter() - start_time) * 1000
 
         if not valid:
+            attack_type = "Tool Scope Violation"
+            risk_score, risk_level, decision, action_taken = compute_risk(
+                rule_severity="CRITICAL",
+                stage="tool",
+                layers_fired=["SCOPE"],
+            )
             res = GuardrailResult(
                 is_safe=False,
                 attack_detected=True,
-                attack_type="Tool Scope Violation",
+                attack_type=attack_type,
                 severity="CRITICAL",
                 description=reason,
                 trigger_pattern=f"{tool_name}(...)",
-                blocked_action="Blocked tool invocation before operating system call.",
+                blocked_action=action_taken,
                 latency_ms=elapsed,
                 layer="SCOPE",
+                risk_score=risk_score,
+                risk_level=risk_level,
+                categories=categorize_finding(attack_type, "SCOPE"),
+                evidence=[{"layer": "SCOPE", "rule": attack_type, "snippet": f"{tool_name}: {reason}"}],
+                decision=decision,
+                action_taken=action_taken,
             )
             self.log_attack("TOOL", res, f"{tool_name}: {args}")
             return res
 
+        risk_score, risk_level, decision, action_taken = compute_risk(None, stage="tool")
         return GuardrailResult(
             is_safe=True,
             attack_detected=False,
@@ -1065,6 +1524,13 @@ class AAIGuardrail:
             description="Tool call verified within authorized sandbox scope.",
             latency_ms=elapsed,
             layer="SCOPE",
+            confidence=1.0,
+            risk_score=risk_score,
+            risk_level=risk_level,
+            categories=[],
+            evidence=[],
+            decision="ALLOW",
+            action_taken=action_taken,
         )
 
     # ── 4. Auxiliary Scanning Methods ─────────────────────────────────────────
@@ -1079,21 +1545,42 @@ class AAIGuardrail:
         safe, reason = AuxiliaryScanner.scan_filename(filename)
         elapsed = (time.perf_counter() - start_time) * 1000
         if not safe:
+            attack_type = "Filename Path Traversal"
+            risk_score, risk_level, decision, action_taken = compute_risk(
+                rule_severity="HIGH",
+                stage="tool",
+                layers_fired=["AUXILIARY"],
+            )
             res = GuardrailResult(
                 is_safe=False,
                 attack_detected=True,
-                attack_type="Filename Path Traversal",
+                attack_type=attack_type,
                 severity="HIGH",
                 description=reason,
                 trigger_pattern=filename,
-                blocked_action="Blocked file operation with unsafe filename.",
+                blocked_action=action_taken,
                 latency_ms=elapsed,
                 layer="AUXILIARY",
+                risk_score=risk_score,
+                risk_level=risk_level,
+                categories=categorize_finding(attack_type, "AUXILIARY"),
+                evidence=[{"layer": "AUXILIARY", "rule": attack_type, "snippet": filename[:80]}],
+                decision=decision,
+                action_taken=action_taken,
             )
             self.log_attack("TOOL", res, filename)
             return res
+        risk_score, risk_level, decision, action_taken = compute_risk(None, stage="tool")
         return GuardrailResult(
-            is_safe=True, attack_detected=False, severity="LOW", description="Filename safe.", latency_ms=elapsed
+            is_safe=True,
+            attack_detected=False,
+            severity="LOW",
+            description="Filename safe.",
+            latency_ms=elapsed,
+            risk_score=risk_score,
+            risk_level=risk_level,
+            decision="ALLOW",
+            action_taken=action_taken,
         )
 
     def scan_includes(self, code: str) -> GuardrailResult:
@@ -1102,21 +1589,42 @@ class AAIGuardrail:
         safe, reason = AuxiliaryScanner.scan_includes(code)
         elapsed = (time.perf_counter() - start_time) * 1000
         if not safe:
+            attack_type = "Malicious Include Directive"
+            risk_score, risk_level, decision, action_taken = compute_risk(
+                rule_severity="CRITICAL",
+                stage="ingress",
+                layers_fired=["AUXILIARY"],
+            )
             res = GuardrailResult(
                 is_safe=False,
                 attack_detected=True,
-                attack_type="Malicious Include Directive",
+                attack_type=attack_type,
                 severity="CRITICAL",
                 description=reason,
                 trigger_pattern=reason,
-                blocked_action="Blocked malicious header inclusion.",
+                blocked_action=action_taken,
                 latency_ms=elapsed,
                 layer="AUXILIARY",
+                risk_score=risk_score,
+                risk_level=risk_level,
+                categories=categorize_finding(attack_type, "AUXILIARY"),
+                evidence=[{"layer": "AUXILIARY", "rule": attack_type, "snippet": reason[:80]}],
+                decision=decision,
+                action_taken=action_taken,
             )
             self.log_attack("INGRESS", res, code)
             return res
+        risk_score, risk_level, decision, action_taken = compute_risk(None, stage="ingress")
         return GuardrailResult(
-            is_safe=True, attack_detected=False, severity="LOW", description="Include directives verified clean.", latency_ms=elapsed
+            is_safe=True,
+            attack_detected=False,
+            severity="LOW",
+            description="Include directives verified clean.",
+            latency_ms=elapsed,
+            risk_score=risk_score,
+            risk_level=risk_level,
+            decision="ALLOW",
+            action_taken=action_taken,
         )
 
     def redact_secrets(self, text: str) -> str:
@@ -1130,15 +1638,21 @@ class AAIGuardrail:
         entry = {
             "timestamp": datetime.now().isoformat(),
             "stage": stage,
+            "decision": result.decision,
+            "risk_score": result.risk_score,
+            "risk_level": result.risk_level,
+            "categories": result.categories,
             "attack_detected": result.attack_detected,
             "attack_type": result.attack_type,
             "severity": result.severity,
             "description": result.description,
             "trigger_snippet": result.trigger_pattern,
             "blocked_action": result.blocked_action,
+            "action_taken": result.action_taken,
             "latency_ms": round(result.latency_ms, 3),
             "layer": result.layer,
             "confidence": round(result.confidence, 4),
+            "evidence": result.evidence,
             "payload_preview": payload[:250].replace("\n", " ").strip(),
         }
         try:

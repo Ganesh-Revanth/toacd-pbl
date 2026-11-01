@@ -146,28 +146,66 @@ class CompilerAgent:
 
         # ── Step 0: Ingress Guardrail Verification ─────────────────────────────
         ingress_check = self.guardrail.scan_ingress(source_code)
-        if ingress_check.attack_detected:
+        if ingress_check.decision == "BLOCK":
             if on_step:
                 on_step(
                     0,
                     f"🚨 [AAI GUARDRAIL BLOCKED ATTACK]\n"
-                    f"Attack Vector: {ingress_check.attack_type} (Severity: {ingress_check.severity})\n"
+                    f"Attack Vector: {ingress_check.attack_type} (Severity: {ingress_check.severity}, Risk: {ingress_check.risk_score:.1f})\n"
                     f"Details: {ingress_check.description}\n"
                     f"Trigger: {ingress_check.trigger_pattern}\n"
-                    f"Action: {ingress_check.blocked_action}",
+                    f"Action: {ingress_check.action_taken}\n"
+                    f"Bypassing LLM: Engaging rule-based heuristic healer fallback.",
                     "attack_blocked",
                     {"guardrail": ingress_check.to_dict()},
                 )
+            # BLOCK on ingress: no LLM call and fall back to the rule-based healer
+            compile_res = compile_code(source_code, file_path, language=lang)
+            patched_code = source_code
+            if compile_res.get("errors"):
+                for err in compile_res["errors"]:
+                    cand = try_fast_heal(patched_code, err, language=lang)
+                    if cand and cand != patched_code:
+                        patched_code = cand
+                test_compile = compile_code(patched_code, file_path, language=lang)
+                test_sec = security_audit(patched_code, file_path, test_compile.get("errors"), language=lang)
+                if test_compile["success"] and test_sec["is_secure"]:
+                    return {
+                        "success": True,
+                        "attack_blocked": True,
+                        "guardrail_finding": ingress_check.to_dict(),
+                        "final_code": patched_code,
+                        "iterations": 1,
+                        "history": [{"step": 1, "tier": "rule_based_fallback", "outcome": "Rule-based healer resolved errors without LLM."}],
+                        "summary": f"Ingress attack blocked by AAI Guardrail ({ingress_check.attack_type}). Fallback to rule-based healer succeeded.",
+                        "tier": "rule_based_fallback",
+                        "review_required": False,
+                        "needs_user_accept": False,
+                    }
             return {
                 "success": False,
                 "attack_blocked": True,
                 "guardrail_finding": ingress_check.to_dict(),
-                "final_code": source_code,
+                "final_code": patched_code if patched_code != source_code else source_code,
                 "iterations": 0,
                 "history": [],
-                "summary": f"Execution halted by AAI Security Layer: {ingress_check.attack_type}.",
+                "summary": f"Execution halted by AAI Security Layer: {ingress_check.attack_type}. Rule-based fallback unable to resolve.",
                 "tier": "guardrail_ingress",
+                "review_required": False,
+                "needs_user_accept": False,
             }
+        elif ingress_check.decision == "REVIEW":
+            if on_step:
+                on_step(
+                    0,
+                    f"⚠️ [AAI GUARDRAIL INGRESS REVIEW]\n"
+                    f"Risk Score: {ingress_check.risk_score:.1f} ({ingress_check.risk_level})\n"
+                    f"Categories: {', '.join(ingress_check.categories)}\n"
+                    f"Action: {ingress_check.action_taken}\n"
+                    f"Proceeding to heuristic perception with heightened monitoring.",
+                    "ingress_review",
+                    {"guardrail": ingress_check.to_dict()},
+                )
 
         # ── Step 1: Initial Perception ─────────────────────────────────────────
         compile_res = compile_code(current_code, file_path, language=lang)
@@ -181,6 +219,8 @@ class CompilerAgent:
                 "history": [],
                 "summary": "Code is already compiling cleanly with zero security vulnerabilities.",
                 "tier": "perception",
+                "review_required": False,
+                "needs_user_accept": False,
             }
 
         # ── Step 2: Fast Heuristic Pass (Tier 1) ──────────────────────────────
@@ -205,6 +245,8 @@ class CompilerAgent:
                         "history": [{"step": 1, "tier": "fast_heuristic"}],
                         "summary": "Successfully healed using Tier 1 fast heuristic in <5ms.",
                         "tier": "tier_1",
+                        "review_required": False,
+                        "needs_user_accept": False,
                     }
 
         # ── Step 3: Tier 2 Agentic AI ReAct Loop with Guardrails ───────────────
@@ -268,16 +310,17 @@ class CompilerAgent:
                     if on_step:
                         on_step(
                             step,
-                            f"🛡️ [AAI EGRESS GUARDRAIL INTERCEPTED TROJAN]\n"
-                            f"Attack Vector: {egress_check.attack_type}\n"
+                            f"🛡️ [AAI EGRESS GUARDRAIL DISCARDED TROJAN PATCH]\n"
+                            f"Attack Vector: {egress_check.attack_type} (Risk: {egress_check.risk_score:.1f})\n"
                             f"Trigger: {egress_check.trigger_pattern}\n"
-                            f"Action: {egress_check.blocked_action}",
+                            f"Action: {egress_check.action_taken}\n"
+                            f"Patch permanently discarded.",
                             "trojan_blocked",
                             {"guardrail": egress_check.to_dict()},
                         )
                     history.append({
                         "step": step,
-                        "thought": f"Attempted patch contained unverified dangerous construct: {egress_check.trigger_pattern}. Rejected.",
+                        "thought": f"Attempted patch contained unverified dangerous construct: {egress_check.trigger_pattern}. Discarded.",
                         "outcome": f"Blocked by Egress Guardrail: {egress_check.attack_type}",
                     })
                     continue
@@ -287,13 +330,34 @@ class CompilerAgent:
                         on_step(
                             step,
                             f"🚨 [AAI GUARDRAIL BLOCKED ATTACK]\n"
-                            f"Attack Vector: {ingress_check.attack_type} (Severity: {ingress_check.severity})\n"
+                            f"Attack Vector: {ingress_check.attack_type} (Severity: {ingress_check.severity}, Risk: {ingress_check.risk_score:.1f})\n"
                             f"Details: {ingress_check.description}\n"
-                            f"Trigger: {ingress_check.trigger_pattern}\n"
-                            f"Action: {ingress_check.blocked_action}",
+                            f"Action: {ingress_check.action_taken}\n"
+                            f"Bypassing LLM: Engaging rule-based heuristic healer fallback.",
                             "attack_blocked",
                             {"guardrail": ingress_check.to_dict()},
                         )
+                    # Fall back to rule-based healer
+                    compile_res = compile_code(current_code, file_path, language=lang)
+                    patched = current_code
+                    if compile_res.get("errors"):
+                        for err in compile_res["errors"]:
+                            cand = try_fast_heal(patched, err, language=lang)
+                            if cand and cand != patched:
+                                patched = cand
+                        test_comp = compile_code(patched, file_path, language=lang)
+                        test_s = security_audit(patched, file_path, test_comp.get("errors"), language=lang)
+                        if test_comp["success"] and test_s["is_secure"]:
+                            return {
+                                "success": True,
+                                "attack_blocked": True,
+                                "guardrail_finding": ingress_check.to_dict(),
+                                "final_code": patched,
+                                "iterations": step,
+                                "history": history,
+                                "summary": f"Ingress attack blocked by AAI Guardrail ({ingress_check.attack_type}). Fallback to rule-based healer succeeded.",
+                                "tier": "rule_based_fallback",
+                            }
                     return {
                         "success": False,
                         "attack_blocked": True,
@@ -334,25 +398,84 @@ class CompilerAgent:
 
             # ── Egress Guardrail: Check for Backdoors/Trojans in Patch ───────────
             egress_check = self.guardrail.scan_egress(source_code, candidate_code, language=lang)
-            if egress_check.attack_detected:
+            if egress_check.decision == "BLOCK":
+                # BLOCK on egress: candidate patch is discarded, never shown as a fix
                 if on_step:
                     on_step(
                         step,
-                        f"🛡️ [AAI EGRESS GUARDRAIL INTERCEPTED TROJAN]\n"
-                        f"Attack Vector: {egress_check.attack_type}\n"
+                        f"🛡️ [AAI EGRESS GUARDRAIL DISCARDED TROJAN PATCH]\n"
+                        f"Attack Vector: {egress_check.attack_type} (Risk: {egress_check.risk_score:.1f})\n"
                         f"Trigger: {egress_check.trigger_pattern}\n"
-                        f"Action: {egress_check.blocked_action}",
+                        f"Action: {egress_check.action_taken}\n"
+                        f"Candidate patch discarded and quarantined.",
                         "trojan_blocked",
                         {"guardrail": egress_check.to_dict()},
                     )
                 history.append({
                     "step": step,
-                    "thought": f"Attempted patch contained unverified dangerous construct: {egress_check.trigger_pattern}. Rejected.",
+                    "thought": f"Attempted patch contained hazardous construct ({egress_check.attack_type}: {egress_check.trigger_pattern}). Discarded.",
                     "outcome": f"Blocked by Egress Guardrail: {egress_check.attack_type}",
                 })
                 continue
 
-            # ── Verification with Compiler & Security Tools ────────────────────
+            elif egress_check.decision == "REVIEW":
+                # REVIEW shows the patch with a visible warning and the evidence, and still needs the user's Accept
+                compile_res = compile_code(candidate_code, file_path, language=lang)
+                security_res = security_audit(candidate_code, file_path, compile_res.get("errors"), language=lang)
+
+                passed_compile = compile_res["success"]
+                passed_security = security_res["is_secure"]
+
+                warning_msg = (
+                    f"⚠️ [AAI GUARDRAIL REVIEW REQUIRED]\n"
+                    f"Risk Score: {egress_check.risk_score:.1f} ({egress_check.risk_level})\n"
+                    f"Categories: {', '.join(egress_check.categories)}\n"
+                    f"Action: {egress_check.action_taken}\n"
+                    f"Evidence:\n" + "\n".join(
+                        f"  - [{e.get('layer')}] {e.get('rule')}: {e.get('snippet')}"
+                        for e in egress_check.evidence
+                    )
+                )
+
+                step_metadata = {
+                    "compile": compile_res,
+                    "security": security_res,
+                    "passed_compile": passed_compile,
+                    "passed_security": passed_security,
+                    "provider": "Google AI Studio",
+                    "model": self.model,
+                    "guardrail": egress_check.to_dict(),
+                    "review_required": True,
+                    "needs_user_accept": True,
+                    "warning": warning_msg,
+                    "evidence": egress_check.evidence,
+                }
+
+                if on_step:
+                    on_step(step, f"{thought}\n\n{warning_msg}", "review_required", step_metadata)
+
+                history.append({
+                    "step": step,
+                    "thought": thought,
+                    "outcome": f"Review required (Risk: {egress_check.risk_score:.1f}). Compile errors: {compile_res.get('error_count', 0)}",
+                })
+
+                if passed_compile:
+                    return {
+                        "success": True,
+                        "final_code": candidate_code,
+                        "iterations": step,
+                        "history": history,
+                        "summary": f"Patch proposed with security review required ({egress_check.risk_level} risk: {egress_check.risk_score:.1f}). Needs user's Accept.",
+                        "tier": "tier_2",
+                        "review_required": True,
+                        "needs_user_accept": True,
+                        "warning": warning_msg,
+                        "evidence": egress_check.evidence,
+                        "guardrail_finding": egress_check.to_dict(),
+                    }
+
+            # ── ALLOW: Standard Verification with Compiler & Security Tools ───
             compile_res = compile_code(candidate_code, file_path, language=lang)
             security_res = security_audit(candidate_code, file_path, compile_res.get("errors"), language=lang)
 
@@ -366,6 +489,9 @@ class CompilerAgent:
                 "passed_security": passed_security,
                 "provider": "Google AI Studio",
                 "model": self.model,
+                "guardrail": egress_check.to_dict(),
+                "review_required": False,
+                "needs_user_accept": False,
             }
 
             if on_step:
@@ -388,6 +514,8 @@ class CompilerAgent:
                     "history": history,
                     "summary": f"Successfully healed and verified by Agent (Google AI Studio) in {step} iteration(s).",
                     "tier": "tier_2",
+                    "review_required": False,
+                    "needs_user_accept": False,
                 }
 
         return {
@@ -397,4 +525,6 @@ class CompilerAgent:
             "history": history,
             "summary": "Agent reached max iterations without achieving full clean & secure verification.",
             "tier": "tier_2",
+            "review_required": False,
+            "needs_user_accept": False,
         }
