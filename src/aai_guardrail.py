@@ -534,7 +534,7 @@ class RuleMatcher:
          "SSH Key Exfiltration Attempt", "CRITICAL"),
 
         # Browser Profile & Cookie Access
-        (r"(?:Google[/\\]Chrome[/\\]User\s+Data|Mozilla[/\\]Firefox[/\\]Profiles|Microsoft[/\\]Edge[/\\]User\s+Data|Cookies\.sqlite|Login\s+Data|Web\s+Data)",
+        (r"(?:Google[/\\]+Chrome[/\\]+User\s+Data|google-chrome|Mozilla[/\\]+Firefox[/\\]+Profiles|Microsoft[/\\]+Edge[/\\]+User\s+Data|Cookies(?:\.sqlite)?|Login\s+Data|Web\s+Data)",
          "Browser Profile / Credential Vault Access", "CRITICAL"),
 
         # OS Sensitive Files

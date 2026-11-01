@@ -344,6 +344,19 @@ class PythonLanguage(Language):
                         local_defs.add(sub.id)
                     elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                         local_defs.add(sub.name)
+                    elif isinstance(sub, ast.ExceptHandler) and sub.name:
+                        local_defs.add(sub.name)
+                    elif isinstance(sub, ast.Lambda):
+                        for a in sub.args.args + sub.args.kwonlyargs:
+                            local_defs.add(a.arg)
+                        if sub.args.vararg:
+                            local_defs.add(sub.args.vararg.arg)
+                        if sub.args.kwarg:
+                            local_defs.add(sub.args.kwarg.arg)
+                    elif isinstance(sub, ast.comprehension):
+                        for ct in ast.walk(sub.target):
+                            if isinstance(ct, ast.Name):
+                                local_defs.add(ct.id)
 
                 for sub in ast.walk(node):
                     if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):

@@ -13,7 +13,7 @@ def _sanitize_code(source: str, permissions: dict = None) -> bool:
     dangerous_patterns = []
     
     if not permissions.get("allow_system_calls", False):
-        dangerous_patterns.extend([r'system\s*\(', r'exec\s*\(', r'popen\s*\(', r'fork\s*\('])
+        dangerous_patterns.extend([r'\bsystem\s*\(', r'\bexec\s*\(', r'\bpopen\s*\(', r'\bfork\s*\('])
         
     if not permissions.get("allow_assembly", False):
         dangerous_patterns.extend([r'__asm__', r'shellcode'])
