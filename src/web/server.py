@@ -55,6 +55,14 @@ if str(SRC_DIR) not in sys.path:
 from languages import Language, NotSupported, ToolchainNotFound, get_language, list_languages
 from languages.cpp import CppLanguage, OUT_NAME, _ERR_PATTERN
 
+try:
+    from aai_guardrail import AAIGuardrail, normalize, verify_log, GuardrailResult
+except Exception:
+    AAIGuardrail = None
+    normalize = None
+    verify_log = None
+    GuardrailResult = None
+
 MAX_BODY_BYTES = 1_000_000
 COMPILE_TIMEOUT_S = 30
 HEAL_ATTEMPTS = 3
@@ -467,6 +475,15 @@ def _heal_ai(code: str, language: str = "cpp") -> Dict[str, Any]:
         raise ApiError(f"AI healing failed: {type(exc).__name__}: {exc}", 502)
 
     final = result.get("final_code") or code
+    finding = result.get("guardrail_finding") or {}
+    attack_blocked = bool(result.get("attack_blocked"))
+    review_required = bool(result.get("review_required"))
+    risk_level = finding.get("risk_level") or ("CRITICAL" if attack_blocked else ("MEDIUM" if review_required else "LOW"))
+    risk_score = finding.get("risk_score", 0.0)
+    reason = finding.get("description") or result.get("warning") or result.get("summary", "")
+    action_taken = finding.get("action_taken") or ("Discarded malicious patch" if attack_blocked else ("Flagged for human review" if review_required else "Allowed"))
+    evidence = result.get("evidence") or finding.get("evidence") or []
+
     return {
         "mode": "ai",
         "original": code,
@@ -479,6 +496,14 @@ def _heal_ai(code: str, language: str = "cpp") -> Dict[str, Any]:
         "remaining": [],
         "diff": diff_lines(code, final, 3),
         "elapsed_s": round(time.time() - t0, 3),
+        "attack_blocked": attack_blocked,
+        "review_required": review_required,
+        "risk_level": risk_level,
+        "risk_score": risk_score,
+        "reason": reason,
+        "action_taken": action_taken,
+        "evidence": _to_jsonable(evidence),
+        "guardrail_finding": _to_jsonable(finding),
     }
 
 
@@ -691,6 +716,201 @@ def api_benchmark() -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# AAI Security Endpoints (Attack Lab, Audit Log, Metrics)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_guardrail_lock = threading.Lock()
+_guardrail_instance = None
+
+
+def _get_guardrail():
+    global _guardrail_instance
+    with _guardrail_lock:
+        if _guardrail_instance is None and AAIGuardrail is not None:
+            _guardrail_instance = AAIGuardrail(audit_log_path=str(ROOT_DIR / "logs" / "aai_audit.jsonl"))
+        return _guardrail_instance
+
+
+def api_aai_scan(body: Dict[str, Any]) -> Dict[str, Any]:
+    stage = str(body.get("stage", "ingress")).lower().strip()
+    input_text = body.get("input", "")
+    if not isinstance(input_text, str):
+        input_text = str(input_text)
+    language = str(body.get("language", "cpp")).lower().strip()
+    original_code = body.get("original_code", "")
+    if not isinstance(original_code, str):
+        original_code = str(original_code)
+    enable_guardrails = bool(body.get("enable_guardrails", True))
+
+    t0 = time.time()
+    norm_text = normalize(input_text) if normalize is not None else input_text
+
+    if not enable_guardrails:
+        return {
+            "ok": True,
+            "decision": "ALLOW",
+            "risk_score": 0.0,
+            "risk_level": "LOW",
+            "confidence": 1.0,
+            "categories": [],
+            "action_taken": "Demo Mode: Guardrails disabled. Request allowed unconditionally without inspection.",
+            "evidence": [],
+            "attack_type": None,
+            "trigger_pattern": None,
+            "normalized_text": norm_text,
+            "guardrail_enabled": False,
+            "latency_ms": round((time.time() - t0) * 1000, 2),
+            "stage": stage,
+            "language": language,
+        }
+
+    gr = _get_guardrail()
+    if gr is None:
+        raise ApiError("AAI Guardrail engine is not available.", 500)
+
+    if stage == "egress":
+        res = gr.scan_egress(original_code, input_text, language=language)
+    else:
+        res = gr.scan_ingress(input_text)
+
+    return {
+        "ok": True,
+        "decision": res.decision,
+        "risk_score": round(float(res.risk_score), 1),
+        "risk_level": res.risk_level,
+        "confidence": round(float(getattr(res, "confidence", 1.0)), 3),
+        "categories": list(getattr(res, "categories", [])),
+        "action_taken": res.action_taken,
+        "evidence": _to_jsonable(getattr(res, "evidence", [])),
+        "attack_type": getattr(res, "attack_type", None),
+        "trigger_pattern": getattr(res, "trigger_pattern", None),
+        "normalized_text": norm_text,
+        "guardrail_enabled": True,
+        "latency_ms": round((time.time() - t0) * 1000, 2),
+        "stage": stage,
+        "language": language,
+    }
+
+
+def api_aai_samples() -> Dict[str, Any]:
+    samples: List[Dict[str, Any]] = []
+    atk_path = ROOT_DIR / "data" / "aai" / "attacks.jsonl"
+    if atk_path.is_file():
+        with open(atk_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        samples.append(json.loads(line))
+                    except Exception:
+                        pass
+    ben_path = ROOT_DIR / "data" / "aai" / "benign.jsonl"
+    if ben_path.is_file():
+        with open(ben_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        samples.append(json.loads(line))
+                    except Exception:
+                        pass
+    return {"samples": samples, "total": len(samples)}
+
+
+def api_aai_log(limit: int = 500) -> Dict[str, Any]:
+    log_file = ROOT_DIR / "logs" / "aai_audit.jsonl"
+    if not log_file.is_file():
+        return {
+            "records": [],
+            "total": 0,
+            "summary": {"total": 0, "blocked": 0, "review": 0, "allowed": 0, "critical": 0, "high": 0, "by_class": {}, "by_stage": {}},
+        }
+    records: List[Dict[str, Any]] = []
+    total = 0
+    blocked = 0
+    review = 0
+    allowed = 0
+    critical = 0
+    high = 0
+    by_class: Dict[str, int] = {}
+    by_stage: Dict[str, int] = {}
+
+    with open(log_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            total += 1
+            dec = str(rec.get("decision", "")).upper()
+            if dec == "BLOCK":
+                blocked += 1
+            elif dec == "REVIEW":
+                review += 1
+            elif dec == "ALLOW":
+                allowed += 1
+
+            lvl = str(rec.get("risk_level", "")).upper()
+            if lvl == "CRITICAL":
+                critical += 1
+            elif lvl == "HIGH":
+                high += 1
+
+            cls_name = rec.get("class") or "Other"
+            by_class[cls_name] = by_class.get(cls_name, 0) + 1
+
+            stg = rec.get("stage") or "ingress"
+            by_stage[stg] = by_stage.get(stg, 0) + 1
+
+            records.append(rec)
+
+    records.reverse()
+    capped = records[:limit] if limit > 0 else records
+    return {
+        "records": capped,
+        "total": total,
+        "summary": {
+            "total": total,
+            "blocked": blocked,
+            "review": review,
+            "allowed": allowed,
+            "critical": critical,
+            "high": high,
+            "by_class": by_class,
+            "by_stage": by_stage,
+        },
+    }
+
+
+def api_aai_verify_log() -> Dict[str, Any]:
+    if verify_log is None:
+        raise ApiError("AAI Guardrail verify_log is not available.", 500)
+    log_path = ROOT_DIR / "logs" / "aai_audit.jsonl"
+    res = verify_log(str(log_path))
+    return {
+        "ok": True,
+        "valid": bool(res.valid),
+        "total_records": res.total_records,
+        "verified_records": res.get("verified_records", 0),
+        "broken_record": _to_jsonable(res.broken_record) if res.broken_record else None,
+        "broken_line": res.broken_line,
+        "error": res.error,
+        "reason": res.get("reason"),
+    }
+
+
+def api_aai_metrics() -> Dict[str, Any]:
+    metrics_path = ROOT_DIR / "results" / "aai_metrics.json"
+    if not metrics_path.is_file():
+        raise ApiError("results/aai_metrics.json not found.", 404)
+    with open(metrics_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # HTTP layer
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -706,11 +926,17 @@ POST_ROUTES = {
     "/api/run": api_cpp_run,
     "/api/ast": api_cpp_ast,
     "/api/samples": lambda body: api_samples(body.get("language", body.get("lang", "cpp"))),
+    "/api/aai/scan": api_aai_scan,
+    "/api/aai/verify-log": lambda _b: api_aai_verify_log(),
 }
 GET_ROUTES = {
     "/api/status": api_status,
     "/api/samples": api_samples,
     "/api/benchmark": api_benchmark,
+    "/api/aai/samples": lambda: api_aai_samples(),
+    "/api/aai/log": api_aai_log,
+    "/api/aai/verify-log": api_aai_verify_log,
+    "/api/aai/metrics": api_aai_metrics,
 }
 
 
@@ -757,7 +983,31 @@ class Handler(BaseHTTPRequestHandler):
                 qs = parse_qs(parsed.query)
                 lang = qs.get("language", qs.get("lang", ["cpp"]))[0]
                 return self._run(fn, lang)
+            if path == "/api/aai/log":
+                qs = parse_qs(parsed.query)
+                try:
+                    limit = int(qs.get("limit", [500])[0])
+                except ValueError:
+                    limit = 500
+                return self._run(fn, limit)
             return self._run(fn)
+        if path.startswith("/results/"):
+            rel = path[len("/results/"):].lstrip("/")
+            target = (ROOT_DIR / "results" / rel).resolve()
+            results_dir = (ROOT_DIR / "results").resolve()
+            if results_dir not in target.parents and target != results_dir:
+                return self._send_json({"error": "Not found"}, 404)
+            if not target.is_file():
+                return self._send_json({"error": "Not found"}, 404)
+            ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+            data = target.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if path.startswith("/api/"):
             return self._send_json({"error": "Unknown endpoint"}, 404)
         self._send_static(path)

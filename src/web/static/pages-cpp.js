@@ -16,6 +16,13 @@ function createProposal(r) {
     kind: (state.cpp.language || 'cpp').toUpperCase() + ' heal · ' + (r.mode === 'ai' ? 'Gemini agent' : 'rule-based'),
     original: r.original, patched: r.patched, diff: r.diff, steps: r.steps || [],
     compiles: r.compiles, summary: r.summary || '', status: 'pending',
+    attack_blocked: r.attack_blocked,
+    review_required: r.review_required,
+    risk_level: r.risk_level,
+    risk_score: r.risk_score,
+    reason: r.reason,
+    action_taken: r.action_taken,
+    evidence: r.evidence,
   };
   // A newer proposal supersedes any older pending one, so there is never an ambiguous choice.
   state.proposals.forEach(o => { if (o.status === 'pending') o.status = 'rejected'; });
@@ -399,6 +406,23 @@ function pageWorkspace(root) {
     const reject = el('button', { class: 'btn', onClick: () => {
       decide(p, 'reject'); lastDecisionNote = notice('', 'Change rejected. Your code is unchanged.'); renderResults(); announce('Change rejected');
     } }, icon('x'), 'Reject');
+
+    // Security Alert for flagged or blocked patches
+    if (p.attack_blocked || p.review_required || (p.risk_level && ['MEDIUM', 'HIGH', 'CRITICAL'].includes(p.risk_level))) {
+      const isBad = p.attack_blocked || p.risk_level === 'CRITICAL' || p.risk_level === 'HIGH';
+      parts.push(
+        notice(isBad ? 'bad' : 'warn',
+          el('div', { class: 'security-alert-box' },
+            el('div', { style: 'font-weight:600;margin-bottom:4px' },
+              (isBad ? '🚨' : '⚠️') + ' Security Alert: [' + (p.risk_level || 'REVIEW') + '] Risk Score: ' + (p.risk_score != null ? p.risk_score : '—') + '/100'),
+            el('div', { class: 'faint', text: 'Reason: ' + (p.reason || 'Flagged by AAI Guardrail for elevated security risk.') }),
+            el('div', { class: 'faint', style: 'margin-top:2px', text: 'Action: ' + (p.action_taken || 'Manual inspection required before applying.') })
+          )
+        ),
+        el('div', { style: 'height:10px' })
+      );
+    }
+
     parts.push(
       el('div', { class: 'run-meta' },
         el('span', { class: 'chip plain' }, p.kind),
@@ -450,12 +474,24 @@ function pageWorkspace(root) {
         const r = await call('/api/cpp/heal', { mode, code, language: s.language });
         if (!r.changed) {
           s.pending = null;
-          healNote = el('div', null,
-            notice(r.compiles ? 'ok' : 'warn', el('b', { text: 'No change proposed. ' }),
-              r.compiles ? 'The code already compiles, so there is nothing to fix.' : 'No automatic fix was found for the remaining problems. Read the explanations in Problems and edit the code, or try the AI fix.'),
-            el('div', { style: 'height:12px' }), StepsList(r.steps));
+          if (r.attack_blocked) {
+            healNote = el('div', null,
+              notice('bad',
+                el('div', { class: 'security-alert-box' },
+                  el('div', { style: 'font-weight:600;margin-bottom:4px' }, '🚨 Security Alert: [' + (r.risk_level || 'CRITICAL') + '] Attack Blocked (Risk: ' + (r.risk_score != null ? r.risk_score : 100) + '/100)'),
+                  el('div', { class: 'faint', text: 'Reason: ' + (r.reason || 'Malicious prompt injection or unsafe construct detected by AAI Guardrail.') }),
+                  el('div', { class: 'faint', style: 'margin-top:2px', text: 'Action: ' + (r.action_taken || 'Execution halted. Malicious patch discarded.') })
+                )
+              ),
+              el('div', { style: 'height:12px' }), StepsList(r.steps));
+          } else {
+            healNote = el('div', null,
+              notice(r.compiles ? 'ok' : 'warn', el('b', { text: 'No change proposed. ' }),
+                r.compiles ? 'The code already compiles, so there is nothing to fix.' : 'No automatic fix was found for the remaining problems. Read the explanations in Problems and edit the code, or try the AI fix.'),
+              el('div', { style: 'height:12px' }), StepsList(r.steps));
+          }
           if (!r.compiles) { s.result = await call('/api/cpp/analyze', { code, language: s.language }); s.run = null; s.lastCheckedCode = code; markEditor(s.result); }
-          announce('No change proposed');
+          announce(r.attack_blocked ? 'Malicious attack blocked by guardrail' : 'No change proposed');
         } else {
           createProposal(r); announce('A change is proposed. Review the diff.');
         }

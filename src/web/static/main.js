@@ -9,6 +9,7 @@ const ROUTES = [
   ] },
   { group: 'Evidence', items: [
     { id: 'benchmark', label: 'Benchmark', title: 'Benchmark', icon: 'chart', render: pageBenchmark },
+    { id: 'security', label: 'Security', title: 'Security', icon: 'shield', render: pageSecurity },
     { id: 'architecture', label: 'Architecture', title: 'Architecture', icon: 'layers', render: pageArchitecture },
   ] },
 ];
