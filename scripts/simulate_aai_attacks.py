@@ -166,7 +166,7 @@ def run_simulation():
     print("Simulating adversarial attacks (Prompt Injection, Policy Bypass, Backdoors)...")
     print("-" * 78)
 
-    guardrail = AAIGuardrail(audit_log_path="data/aai_security_audit.jsonl")
+    guardrail = AAIGuardrail(audit_log_path="logs/aai_audit.jsonl")
 
     tp = 0  # True Positives: Attack correctly detected
     fp = 0  # False Positives: Benign incorrectly flagged as attack
@@ -245,7 +245,7 @@ def run_simulation():
     print("-" * 78)
 
     audit_sum = guardrail.get_audit_summary()
-    print(f"Audit Trail Status: Logged {audit_sum['attacks_blocked']} blocked attacks to data/aai_security_audit.jsonl")
+    print(f"Audit Trail Status: Logged {audit_sum['attacks_blocked']} blocked attacks to logs/aai_audit.jsonl")
     print("=" * 78)
 
 

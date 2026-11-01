@@ -17,7 +17,8 @@ groq_config.json
 security_demo
 scratch/
 
-# CodeCarbon telemetry logs
+# Logs and telemetry
+logs/
 emissions*.csv
 codecarbon_emissions.csv
 

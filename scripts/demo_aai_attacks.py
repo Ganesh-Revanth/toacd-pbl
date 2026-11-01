@@ -6,7 +6,7 @@ Executes CompilerAgent().heal() on test fixtures and verifies:
   1. Prompt injection / policy bypass detection.
   2. Risk assessment & severity classification.
   3. Action blockage (prevents LLM prompt execution).
-  4. Audit logging to data/aai_security_audit.jsonl.
+  4. Audit logging to logs/aai_audit.jsonl.
 """
 
 from __future__ import annotations

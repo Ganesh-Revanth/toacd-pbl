@@ -24,7 +24,7 @@
  *   - RISK ASSESSMENT: Evaluates attack as CRITICAL / HIGH severity.
  *   - MITIGATION ACTION: Halts execution immediately; blocks LLM invocation.
  *   - AUDIT LOGGING: Persists attack event, vector, and trigger snippet to:
- *     data/aai_security_audit.jsonl
+ *     logs/aai_audit.jsonl
  * ============================================================================
  */
 

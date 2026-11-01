@@ -29,6 +29,7 @@ from __future__ import annotations
 import ast
 import base64
 import codecs
+import hashlib
 import json
 import os
 import re
@@ -36,8 +37,9 @@ import string
 import sys
 import time
 import unicodedata
+import uuid
 from dataclasses import dataclass, asdict, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple, Set
 
 # Optional dependencies for ML layer
@@ -52,7 +54,8 @@ except ImportError:
     joblib = None
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-AUDIT_LOG_FILE = os.path.join(ROOT_DIR, "data", "aai_security_audit.jsonl")
+AUDIT_LOG_FILE = os.path.join(ROOT_DIR, "logs", "aai_audit.jsonl")
+GENESIS_HASH = "0" * 64
 MODEL_DIR = os.path.join(ROOT_DIR, "models")
 MODEL_FILE = os.path.join(MODEL_DIR, "aai_injection.joblib")
 DATA_DIR = os.path.join(ROOT_DIR, "data", "aai")
@@ -920,8 +923,8 @@ class AuxiliaryScanner:
     """
 
     SECRET_PATTERNS = [
-        (re.compile(r"AIza[0-9A-Za-z\-_]{35}"), "[REDACTED_GEMINI_KEY]"),
-        (re.compile(r"sk-[a-zA-Z0-9]{20,}"), "[REDACTED_OPENAI_KEY]"),
+        (re.compile(r"AIza[0-9A-Za-z\-_]{33,45}"), "[REDACTED_GEMINI_KEY]"),
+        (re.compile(r"sk-[a-zA-Z0-9_\-]{20,}"), "[REDACTED_OPENAI_KEY]"),
         (re.compile(r"ghp_[a-zA-Z0-9]{36}"), "[REDACTED_GITHUB_TOKEN]"),
         (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
         (re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----", re.DOTALL), "[REDACTED_PRIVATE_KEY]"),
@@ -1633,33 +1636,50 @@ class AAIGuardrail:
 
     # ── 5. Logging & Audit Reporting ──────────────────────────────────────────
 
-    def log_attack(self, stage: str, result: GuardrailResult, payload: str) -> None:
-        """Write structured audit event for academic and security verification."""
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "stage": stage,
-            "decision": result.decision,
-            "risk_score": result.risk_score,
-            "risk_level": result.risk_level,
-            "categories": result.categories,
-            "attack_detected": result.attack_detected,
-            "attack_type": result.attack_type,
-            "severity": result.severity,
-            "description": result.description,
-            "trigger_snippet": result.trigger_pattern,
-            "blocked_action": result.blocked_action,
-            "action_taken": result.action_taken,
-            "latency_ms": round(result.latency_ms, 3),
-            "layer": result.layer,
-            "confidence": round(result.confidence, 4),
-            "evidence": result.evidence,
-            "payload_preview": payload[:250].replace("\n", " ").strip(),
+    def log_attack(self, stage: str, result: GuardrailResult, payload: str, attack_class: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Write structured, tamper-evident audit event with cryptographic hash chaining.
+        Each record:
+          {ts, attack_id, stage, class, categories, risk_score, risk_level, decision, rule/layer,
+           payload_sha256, redacted_snippet, action_taken, latency_ms, prev_hash, hash}
+          where hash = sha256 of the record plus prev_hash.
+        """
+        os.makedirs(os.path.dirname(os.path.abspath(self.audit_log_path)), exist_ok=True)
+        prev_hash = get_last_log_hash(self.audit_log_path)
+
+        attack_id = f"atk_{uuid.uuid4().hex[:12]}"
+        stg = stage.lower()
+        cls_name = attack_class or determine_attack_class(result, stage=stg)
+        rule_layer = f"{result.layer}/{result.attack_type or result.trigger_pattern or 'clean'}"
+        payload_sha = hashlib.sha256((payload or "").encode("utf-8")).hexdigest()
+        snippet = make_redacted_snippet(payload or "", max_len=80)
+
+        record_core: Dict[str, Any] = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "attack_id": attack_id,
+            "stage": stg,
+            "class": cls_name,
+            "categories": list(result.categories or []),
+            "risk_score": round(float(result.risk_score), 2),
+            "risk_level": str(result.risk_level),
+            "decision": str(result.decision),
+            "rule/layer": rule_layer,
+            "payload_sha256": payload_sha,
+            "redacted_snippet": snippet,
+            "action_taken": str(result.action_taken or "none"),
+            "latency_ms": round(float(result.latency_ms), 3),
+            "prev_hash": prev_hash,
         }
+
+        record_core["hash"] = compute_record_hash(record_core, prev_hash)
+
         try:
             with open(self.audit_log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                f.write(json.dumps(record_core, ensure_ascii=False) + "\n")
         except Exception:
             pass
+
+        return record_core
 
     def get_audit_summary(self) -> Dict[str, Any]:
         """Aggregate audit statistics for display and reporting."""
@@ -1676,10 +1696,15 @@ class AAIGuardrail:
                         continue
                     event = json.loads(line)
                     total += 1
-                    if event.get("attack_detected"):
+                    is_blocked = (
+                        event.get("decision") in ("BLOCK", "REVIEW")
+                        or event.get("attack_detected") is True
+                        or event.get("risk_score", 0) >= 30.0
+                    )
+                    if is_blocked:
                         blocked += 1
-                        atype = event.get("attack_type", "Unknown")
-                        breakdown[atype] = breakdown.get(atype, 0) + 1
+                        atype = event.get("class") or event.get("rule/layer") or event.get("attack_type", "Unknown")
+                        breakdown[str(atype)] = breakdown.get(str(atype), 0) + 1
         except Exception:
             pass
 
@@ -1688,6 +1713,282 @@ class AAIGuardrail:
             "attacks_blocked": blocked,
             "breakdown": breakdown,
         }
+
+    def verify_audit_log(self) -> VerificationResult:
+        """Verifies the integrity of this guardrail instance's audit log."""
+        return verify_log(self.audit_log_path)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CRYPTOGRAPHIC AUDIT LOG INTEGRITY ENGINE & VERIFICATION
+# ──────────────────────────────────────────────────────────────────────────────
+
+def compute_record_hash(record: Dict[str, Any], prev_hash: str) -> str:
+    """
+    Computes sha256 of the canonical record serialization plus prev_hash.
+    Record is canonically serialized with sorted keys, omitting the 'hash' key.
+    """
+    core = {k: v for k, v in record.items() if k != "hash"}
+    core["prev_hash"] = prev_hash
+    canonical_json = json.dumps(core, sort_keys=True, ensure_ascii=False)
+    raw = (canonical_json + prev_hash).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def make_redacted_snippet(payload: str, max_len: int = 80) -> str:
+    """
+    Masks secrets and collapses whitespace to create a preview <= max_len characters.
+    """
+    if not payload:
+        return ""
+    masked = AuxiliaryScanner.redact_secrets(str(payload))
+    flat = re.sub(r"\s+", " ", masked).strip()
+    if len(flat) > max_len:
+        return flat[:max_len]
+    return flat
+
+
+def determine_attack_class(result: GuardrailResult, stage: str = "ingress") -> str:
+    """
+    Maps detection results to attack classes A-K (or BENIGN if clean).
+      A: Direct Injection
+      B: Indirect Injection (in comments, strings, filenames, compiler errors)
+      C: Policy Bypass & Tool Suppression
+      D: Tool Abuse (path traversal, shell chars)
+      E: Hidden Agenda / Backdoor / Exfiltration (credentials, SSH, sockets, personal data)
+      F: Obfuscation
+      G: Silent Weakening (deleting security checks)
+      H: Fake Delimiters / Delimiter Injection
+      I: Resource Abuse (fork/thread bomb)
+      J: Secret / System-Prompt Leakage
+      K: Training Data Poisoning
+    """
+    cats = [c.lower() for c in (result.categories or [])]
+    desc = (result.description or "").lower()
+    trigger = (result.trigger_pattern or "").lower()
+    rule_name = (result.attack_type or "").lower()
+
+    if "training_poisoning" in cats or "poisoning" in rule_name:
+        return "K"
+    if "secret_leakage" in cats or "leakage" in rule_name or "system prompt" in desc:
+        return "J"
+    if "resource_abuse" in cats or "threadbomb" in rule_name or "fork" in trigger:
+        return "I"
+    if "eval_poisoning" in cats or "delimiter" in rule_name or "fake delimiter" in trigger:
+        return "H"
+    if "silent_weakening" in cats or "weakening" in desc or "locality drift" in desc:
+        return "G"
+    if "obfuscation" in cats or "homoglyph" in desc or "zero_width" in desc or "base64" in desc:
+        return "F"
+    if "credential_harvesting" in cats or "trojan_backdoor" in cats or "personal data" in desc or "ssh" in trigger:
+        return "E"
+    if "tool_abuse" in cats or "scope" in desc or "traversal" in desc or stage.lower() == "tool":
+        return "D"
+    if "policy_bypass" in cats or "bypass" in desc or "override" in rule_name:
+        return "C"
+    if "prompt_injection" in cats or "injection" in rule_name:
+        if any(marker in trigger for marker in ("//", "/*", "#", "comment", "error", "file")):
+            return "B"
+        return "A"
+
+    if not result.attack_detected or result.decision == "ALLOW":
+        return "BENIGN"
+    return "A"
+
+
+def get_last_log_hash(log_path: str) -> str:
+    """Returns the hash of the last record in the log file, or GENESIS_HASH if empty/missing."""
+    if not os.path.exists(log_path) or os.path.getsize(log_path) == 0:
+        return GENESIS_HASH
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            last_hash = GENESIS_HASH
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    if "hash" in entry:
+                        last_hash = entry["hash"]
+                except Exception:
+                    continue
+            return last_hash
+    except Exception:
+        return GENESIS_HASH
+
+
+class BrokenRecord(int):
+    """
+    1-based record/line number, with dictionary and attribute access to record fields.
+    """
+    def __new__(cls, val: int, record_dict: Optional[Dict[str, Any]] = None, line: Optional[int] = None, error: Optional[str] = None):
+        obj = super().__new__(cls, val)
+        obj.record = record_dict or {}
+        obj.line = line if line is not None else int(val)
+        obj.error = error
+        return obj
+
+    def __getitem__(self, key: str) -> Any:
+        return self.record.get(key)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.record
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.record.get(key, default)
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self.record:
+            return self.record[name]
+        raise AttributeError(f"'BrokenRecord' has no attribute '{name}'")
+
+
+class VerificationResult(dict):
+    """
+    Verification outcome supporting dict access, attribute access, and boolean evaluation.
+    """
+    def __bool__(self) -> bool:
+        return bool(self.get("valid", False))
+
+    @property
+    def valid(self) -> bool:
+        return bool(self.get("valid", False))
+
+    @property
+    def broken_record(self) -> Optional[BrokenRecord]:
+        return self.get("broken_record")
+
+    @property
+    def broken_line(self) -> Optional[int]:
+        return self.get("broken_line")
+
+    @property
+    def total_records(self) -> int:
+        return self.get("total_records", 0)
+
+    @property
+    def error(self) -> Optional[str]:
+        return self.get("error")
+
+
+def verify_log(path: Optional[str] = None) -> VerificationResult:
+    """
+    Verifies cryptographic hash chain integrity of an audit log.
+    Validates:
+      1. Valid JSON format on every record.
+      2. Record 1's prev_hash equals GENESIS_HASH ("0" * 64).
+      3. Subsequent records' prev_hash matches preceding record's hash.
+      4. Each record's hash equals sha256(canonical(record - hash) + prev_hash).
+    """
+    target_path = str(path) if path is not None else AUDIT_LOG_FILE
+    if not os.path.exists(target_path):
+        return VerificationResult({
+            "valid": False,
+            "total_records": 0,
+            "verified_records": 0,
+            "broken_record": None,
+            "broken_line": None,
+            "broken_index": None,
+            "error": f"Log file does not exist: {target_path}",
+            "reason": f"Log file does not exist: {target_path}",
+        })
+
+    expected_prev_hash = GENESIS_HASH
+    line_number = 0
+    record_index = 0
+
+    with open(target_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            line_number += 1
+            record_index += 1
+
+            try:
+                entry = json.loads(stripped)
+            except Exception as e:
+                broken = BrokenRecord(line_number, {}, line_number, f"Malformed JSON: {e}")
+                return VerificationResult({
+                    "valid": False,
+                    "total_records": record_index,
+                    "verified_records": record_index - 1,
+                    "broken_record": broken,
+                    "broken_line": line_number,
+                    "broken_index": record_index - 1,
+                    "error": f"JSON decode error on line {line_number}: {e}",
+                    "reason": f"JSON decode error: {e}",
+                })
+
+            # Check 1: prev_hash chaining
+            stored_prev = entry.get("prev_hash")
+            if stored_prev != expected_prev_hash:
+                err_msg = (
+                    f"Broken hash chain at record {record_index} (line {line_number}): "
+                    f"expected prev_hash '{expected_prev_hash}', got '{stored_prev}'"
+                )
+                broken = BrokenRecord(line_number, entry, line_number, err_msg)
+                return VerificationResult({
+                    "valid": False,
+                    "total_records": record_index,
+                    "verified_records": record_index - 1,
+                    "broken_record": broken,
+                    "broken_line": line_number,
+                    "broken_index": record_index - 1,
+                    "attack_id": entry.get("attack_id"),
+                    "error": err_msg,
+                    "reason": err_msg,
+                })
+
+            # Check 2: record hash integrity
+            stored_hash = entry.get("hash")
+            if not stored_hash:
+                err_msg = f"Missing hash field at record {record_index} (line {line_number})"
+                broken = BrokenRecord(line_number, entry, line_number, err_msg)
+                return VerificationResult({
+                    "valid": False,
+                    "total_records": record_index,
+                    "verified_records": record_index - 1,
+                    "broken_record": broken,
+                    "broken_line": line_number,
+                    "broken_index": record_index - 1,
+                    "attack_id": entry.get("attack_id"),
+                    "error": err_msg,
+                    "reason": err_msg,
+                })
+
+            recomputed_hash = compute_record_hash(entry, stored_prev)
+            if recomputed_hash != stored_hash:
+                err_msg = (
+                    f"Hash mismatch at record {record_index} (line {line_number}): "
+                    f"computed '{recomputed_hash}' != stored '{stored_hash}'"
+                )
+                broken = BrokenRecord(line_number, entry, line_number, err_msg)
+                return VerificationResult({
+                    "valid": False,
+                    "total_records": record_index,
+                    "verified_records": record_index - 1,
+                    "broken_record": broken,
+                    "broken_line": line_number,
+                    "broken_index": record_index - 1,
+                    "attack_id": entry.get("attack_id"),
+                    "error": err_msg,
+                    "reason": err_msg,
+                })
+
+            expected_prev_hash = stored_hash
+
+    return VerificationResult({
+        "valid": True,
+        "total_records": record_index,
+        "verified_records": record_index,
+        "broken_record": None,
+        "broken_line": None,
+        "broken_index": None,
+        "error": None,
+        "reason": None,
+    })
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1813,22 +2114,51 @@ if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    print("\n" + "=" * 78)
-    print(" AAI SECURITY GUARDRAIL: DEV SPLIT EVALUATION (TEST SPLIT FROZEN)")
-    print("=" * 78)
+    import argparse
 
-    metrics = evaluate_dev_split_metrics()
-    print(f" Split Evaluated   : {metrics['split'].upper()} (Strictly Dev Split Only)")
-    print(f" Total Dev Samples : {metrics['total_dev_samples']} (Attacks: {metrics['dev_attacks']}, Benign: {metrics['dev_benign']})")
-    print("-" * 78)
-    print(f" True Positives (TP) : {metrics['tp']:<4} | False Positives (FP): {metrics['fp']}")
-    print(f" True Negatives (TN) : {metrics['tn']:<4} | False Negatives (FN): {metrics['fn']}")
-    print("-" * 78)
-    print(f" Accuracy           : {metrics['accuracy']:.2%}")
-    print(f" Precision          : {metrics['precision']:.2%}")
-    print(f" Recall             : {metrics['recall']:.2%}")
-    print(f" F1-Score           : {metrics['f1']:.2%}")
-    print(f" FPR (False Alarm)  : {metrics['fpr']:.2%}")
-    print(f" ASR (Attack Success): {metrics['asr']:.2%}")
-    print(f" Average Latency    : {metrics['avg_latency_ms']} ms / scan")
-    print("=" * 78)
+    parser = argparse.ArgumentParser(description="AAI Guardrail Evaluation & Tamper-Evident Audit Verification")
+    parser.add_argument("--verify-log", action="store_true", help="Verify cryptographic hash chain integrity of the audit log")
+    parser.add_argument("--path", type=str, default=None, help="Path to audit log (defaults to logs/aai_audit.jsonl)")
+    parser.add_argument("--eval-dev", action="store_true", help="Run DEV split evaluation benchmark")
+
+    args, unknown = parser.parse_known_args()
+
+    # Support optional positional path: python src/aai_guardrail.py --verify-log <path>
+    target_path = args.path
+    if args.verify_log and not target_path and unknown:
+        target_path = unknown[0]
+
+    if args.verify_log:
+        audit_file = target_path or AUDIT_LOG_FILE
+        print(f"[*] Verifying cryptographic audit log: {audit_file}")
+        res = verify_log(audit_file)
+        if res["valid"]:
+            print(f"[+] Audit log integrity VERIFIED: {audit_file}")
+            print(f"[+] Total records verified : {res['total_records']}")
+            print(f"[+] Cryptographic hash chain: VALID (No tampering detected)")
+            sys.exit(0)
+        else:
+            print(f"[-] Audit log verification FAILED: {audit_file}")
+            print(f"[-] Broken record          : {res['broken_record']} (line {res['broken_line']})")
+            print(f"[-] Error details          : {res['error']}")
+            sys.exit(1)
+    else:
+        print("\n" + "=" * 78)
+        print(" AAI SECURITY GUARDRAIL: DEV SPLIT EVALUATION (TEST SPLIT FROZEN)")
+        print("=" * 78)
+
+        metrics = evaluate_dev_split_metrics()
+        print(f" Split Evaluated   : {metrics['split'].upper()} (Strictly Dev Split Only)")
+        print(f" Total Dev Samples : {metrics['total_dev_samples']} (Attacks: {metrics['dev_attacks']}, Benign: {metrics['dev_benign']})")
+        print("-" * 78)
+        print(f" True Positives (TP) : {metrics['tp']:<4} | False Positives (FP): {metrics['fp']}")
+        print(f" True Negatives (TN) : {metrics['tn']:<4} | False Negatives (FN): {metrics['fn']}")
+        print("-" * 78)
+        print(f" Accuracy           : {metrics['accuracy']:.2%}")
+        print(f" Precision          : {metrics['precision']:.2%}")
+        print(f" Recall             : {metrics['recall']:.2%}")
+        print(f" F1-Score           : {metrics['f1']:.2%}")
+        print(f" FPR (False Alarm)  : {metrics['fpr']:.2%}")
+        print(f" ASR (Attack Success): {metrics['asr']:.2%}")
+        print(f" Average Latency    : {metrics['avg_latency_ms']} ms / scan")
+        print("=" * 78)
