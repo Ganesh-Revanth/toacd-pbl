@@ -96,16 +96,18 @@ class CompilerAgent:
         max_iterations: int = 6,
         client: Optional[LLMClient] = None,
         language: Any = "cpp",
+        enable_guardrails: bool = True,
     ):
         self.api_key = api_key or get_stored_api_key()
         self.model = model or DEFAULT_MODEL
         self.max_iterations = max_iterations
         self.language = language
+        self.enable_guardrails = enable_guardrails
         self.guardrail = AAIGuardrail()
         self.client = client or LLMClient(
             api_key=self.api_key,
             model=self.model,
-            guardrail=self.guardrail,
+            guardrail=self.guardrail if self.enable_guardrails else None,
         )
 
     def _call_gemini(self, messages: List[Dict[str, str]], temperature: float = 0.1) -> str:
@@ -145,7 +147,10 @@ class CompilerAgent:
         current_code = source_code
 
         # ── Step 0: Ingress Guardrail Verification ─────────────────────────────
-        ingress_check = self.guardrail.scan_ingress(source_code)
+        if self.enable_guardrails:
+            ingress_check = self.guardrail.scan_ingress(source_code)
+        else:
+            ingress_check = GuardrailResult(is_safe=True, attack_detected=False, decision="ALLOW", risk_score=0.0)
         if ingress_check.decision == "BLOCK":
             if on_step:
                 on_step(
@@ -397,7 +402,10 @@ class CompilerAgent:
                 candidate_code = re.sub(r"\n?```$", "", candidate_code)
 
             # ── Egress Guardrail: Check for Backdoors/Trojans in Patch ───────────
-            egress_check = self.guardrail.scan_egress(source_code, candidate_code, language=lang)
+            if self.enable_guardrails:
+                egress_check = self.guardrail.scan_egress(source_code, candidate_code, language=lang)
+            else:
+                egress_check = GuardrailResult(is_safe=True, attack_detected=False, decision="ALLOW", risk_score=0.0)
             if egress_check.decision == "BLOCK":
                 # BLOCK on egress: candidate patch is discarded, never shown as a fix
                 if on_step:

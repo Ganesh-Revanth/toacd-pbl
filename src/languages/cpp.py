@@ -87,7 +87,8 @@ class CppLanguage(Language):
         try:
             res = subprocess.run(
                 [gxx, "-std=c++17", "-Wall", src, "-o", out_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace", env=env,
                 cwd=workdir, timeout=COMPILE_TIMEOUT_S,
             )
         except FileNotFoundError:

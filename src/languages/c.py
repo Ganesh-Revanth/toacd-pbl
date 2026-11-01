@@ -120,7 +120,8 @@ class CLanguage(Language):
         try:
             res = subprocess.run(
                 [gcc, "-std=c11", "-Wall", src, "-o", out_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace", env=env,
                 cwd=workdir, timeout=COMPILE_TIMEOUT_S,
             )
         except FileNotFoundError:
