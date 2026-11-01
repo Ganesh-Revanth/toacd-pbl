@@ -368,7 +368,7 @@ function pageWorkspace(root) {
     const r = s.result;
     if (!r) return el('div', { class: 'empty' }, el('b', { text: 'No problems to show' }), 'Compile your code and any errors or warnings are listed here, explained in plain language.');
     const head = el('div', { class: 'prob-head' },
-      el('h2', { text: r.ok ? (r.warning_count ? 'Compiles, with warnings' : 'No problems found') : plural(r.error_count || 0, 'error') + (r.warning_count ? ', ' + plural(r.warning_count, 'warning') : '') }),
+      el('h2', { text: r.ok ? (r.warning_count ? 'Compiles, with warnings' : 'Compiles cleanly') : plural(r.error_count || 0, 'error') + (r.warning_count ? ', ' + plural(r.warning_count, 'warning') : '') }),
       el('span', { class: 'faint', text: (r.elapsed_s != null ? r.elapsed_s + ' s' : '') }));
     const list = el('div', { class: 'prob-list' });
     const diags = r.diagnostics || [];

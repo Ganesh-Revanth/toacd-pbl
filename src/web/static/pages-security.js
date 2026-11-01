@@ -280,6 +280,7 @@ async function pageSecurity(root) {
 
     return container;
   };
+  tabs.refresh();
 
   function renderScanResult(host, r, rawInput) {
     const isBlock = r.decision === 'BLOCK';

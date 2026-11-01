@@ -80,6 +80,29 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b"Green Compiler Studio", body)
 
+    def test_self_hosted_fonts_served(self):
+        status, body = self.get("/fonts/newsreader-latin-opsz-normal.woff2")
+        self.assertEqual(status, 200)
+        self.assertGreater(len(body), 50000)
+
+        status, body = self.get("/fonts/newsreader-latin-opsz-italic.woff2")
+        self.assertEqual(status, 200)
+        self.assertGreater(len(body), 50000)
+
+        status, body = self.get("/fonts/OFL.txt")
+        self.assertEqual(status, 200)
+        self.assertIn(b"SIL OPEN FONT LICENSE", body)
+
+    def test_fonts_directory_under_size_limit(self):
+        fonts_dir = os.path.join(os.path.dirname(__file__), "..", "src", "web", "static", "fonts")
+        self.assertTrue(os.path.isdir(fonts_dir))
+        files = os.listdir(fonts_dir)
+        self.assertIn("newsreader-latin-opsz-normal.woff2", files)
+        self.assertIn("newsreader-latin-opsz-italic.woff2", files)
+        self.assertIn("OFL.txt", files)
+        total_size = sum(os.path.getsize(os.path.join(fonts_dir, f)) for f in files)
+        self.assertLess(total_size, 400 * 1024, f"Fonts directory exceeds 400 KB: {total_size} bytes")
+
     def test_path_traversal_is_blocked(self):
         for p in ("/../server.py", "/%2e%2e/server.py", "/..%2f..%2fREADME.md"):
             status, _ = self.get(p)

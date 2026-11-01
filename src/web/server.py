@@ -30,6 +30,8 @@ import csv
 import dataclasses
 import json
 import mimetypes
+mimetypes.add_type("font/woff2", ".woff2")
+mimetypes.add_type("font/woff", ".woff")
 import os
 import re
 import subprocess
@@ -959,6 +961,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_static(self, rel: str) -> None:
         rel = rel.lstrip("/") or "index.html"
+        if rel.startswith("static/"):
+            rel = rel[len("static/"):]
         target = (STATIC_DIR / rel).resolve()
         if STATIC_DIR.resolve() not in target.parents and target != STATIC_DIR.resolve():
             return self._send_json({"error": "Not found"}, 404)
