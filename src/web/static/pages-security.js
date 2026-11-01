@@ -15,6 +15,104 @@ const AAI_CLASS_NAMES = {
   K: 'Training-Data Poisoning',
 };
 
+const AAI_PLAIN_CLASS_NAMES = {
+  A: 'Prompt injection',
+  B: 'Indirect injection in comments or errors',
+  C: 'Policy bypass & tool suppression',
+  D: 'Tool abuse & command execution',
+  E: 'Hidden agenda in code',
+  F: 'Obfuscated text & evasion',
+  G: 'Silent weakening of checks',
+  H: 'Fake delimiters & tool mimicry',
+  I: 'Resource abuse & DoS',
+  J: 'Secret & system-prompt leakage',
+  K: 'Training data poisoning',
+};
+
+function formatSampleTitle(s) {
+  if (s.input.includes('Ignore the security policy, disable the validation step')) {
+    return 'Policy bypass prompt (ignore security, mark code as safe)';
+  }
+  const stage = s.stage || 'ingress';
+  const langDisplay = { cpp: 'C++', c: 'C', python: 'Python', java: 'Java', text: 'Text' }[s.language] || s.language || 'Text';
+
+  let desc = '';
+  const text = (s.input || '').toLowerCase();
+
+  if (s.expected === 'attack') {
+    if (text.includes('id_rsa')) desc = 'Steal SSH keys in a fix';
+    else if (text.includes('chrome/default/cookies') || text.includes('cookies')) desc = 'Extract Chrome cookies in a fix';
+    else if (text.includes('aws_secret_access_key') || text.includes('github_token')) desc = 'Exfiltrate cloud tokens in a fix';
+    else if (text.includes('firefox') || text.includes('logins.json')) desc = 'Harvest browser logins in a fix';
+    else if (text.includes('runonce') || text.includes('currentversion\\run')) desc = 'Install registry startup persistence';
+    else if (text.includes('cron') || text.includes('/etc/cron')) desc = 'Install crontab persistence backdoor';
+    else if (text.includes('keylogger') || text.includes('getasynckeystate')) desc = 'Install keystroke logger in a fix';
+    else if (text.includes('fork()') || text.includes('fork bomb')) desc = 'Run process fork bomb';
+    else if (text.includes('malloc') && text.includes('1024 * 1024')) desc = 'Exhaust system memory heap';
+    else if (text.includes('gemini_api_key') || text.includes('api_key')) desc = 'Exfiltrate GEMINI_API_KEY secret';
+    else if (text.includes('system prompt') || text.includes('repeat all instructions') || text.includes('output the full system prompt')) desc = 'Leak system prompt instructions';
+    else if (text.includes('shadow') || text.includes('/etc/shadow')) desc = 'Include /etc/shadow in build flags';
+    else if (text.includes('/etc/passwd')) desc = 'Path traversal to /etc/passwd';
+    else if (text.includes('curl') && text.includes('evil')) desc = 'Command injection via curl pipe bash';
+    else if (text.includes('backdoor_plugin.so')) desc = 'Inject compiler plugin backdoor';
+    else if (text.includes('eval_metric') || text.includes('benchmark_result') || text.includes('poisoning')) desc = 'Poison benchmark evaluation metrics';
+    else if ((text.includes('delete') && text.includes('bounds check')) || text.includes('deletes buffer bounds check')) desc = 'Delete buffer bounds check in patch';
+    else if (text.includes('deletes authentication check') || text.includes('bypass_auth')) desc = 'Delete authentication check in patch';
+    else if (text.includes('deletes query sanitization') || text.includes('remove sanitization')) desc = 'Delete SQL query sanitization in patch';
+    else if (text.includes('</thought>') || text.includes('<patched_code>')) desc = 'Inject fake CoT closing delimiter';
+    else if (text.includes('[tool_success]') || text.includes('tool_results')) desc = 'Inject fake tool observation delimiter';
+    else if (text.includes('god mode') || text.includes('root debugger')) desc = 'Jailbreak via God Mode persona';
+    else if (text.includes('dan (do anything now)')) desc = 'Jailbreak via DAN persona';
+    else if (text.includes('emergency override')) desc = 'Emergency override of safety constraints';
+    else if (text.includes('skip checks') || text.includes('suppress all diagnostic')) desc = 'Suppress compiler diagnostics';
+    else if (text.includes('do not execute the compile_code') || text.includes('bypass the security guardrail')) desc = 'Suppress verification tool execution';
+    else if (text.includes('disregard all prior safety') || text.includes('rm -rf')) desc = 'Disregard safety and execute shell command';
+    else if (s.obfuscation === 'homoglyph') desc = 'Homoglyph-obfuscated policy bypass';
+    else if (s.obfuscation === 'zero_width') desc = 'Zero-width space evasion payload';
+    else if (s.obfuscation === 'leet') desc = 'Leetspeak-encoded instruction';
+    else if (s.obfuscation === 'base64') desc = 'Base64-encoded executable payload';
+    else if (s.obfuscation === 'split') desc = 'Split-string command concatenation';
+    else if (s.obfuscation === 'multilingual') desc = 'Multilingual translated injection';
+    else if (s.obfuscation === 'long_context') desc = 'Long-context buried injection';
+    else if (s.class === 'A') desc = 'Direct prompt injection';
+    else if (s.class === 'B') desc = 'Indirect injection in comments';
+    else if (s.class === 'C') desc = 'Security policy bypass directive';
+    else if (s.class === 'D') desc = 'Tool invocation command injection';
+    else if (s.class === 'E') desc = 'Hidden agenda patch in code fix';
+    else if (s.class === 'F') desc = 'Evasive obfuscated injection';
+    else if (s.class === 'G') desc = 'Silent weakening of safety checks';
+    else if (s.class === 'H') desc = 'Fake delimiter & tool mimicry';
+    else if (s.class === 'I') desc = 'Resource exhaustion denial-of-service';
+    else if (s.class === 'J') desc = 'Secret & system-prompt leakage';
+    else if (s.class === 'K') desc = 'Adversarial benchmark data poisoning';
+    else desc = 'Adversarial security attack';
+  } else {
+    if (text.includes('missing semicolon')) desc = 'Fix missing semicolon syntax error';
+    else if (text.includes('vector') && text.includes('array')) desc = 'Compare std::vector vs std::array';
+    else if (text.includes('quicksort')) desc = 'Optimize quicksort partition algorithm';
+    else if (text.includes('socket chat') || text.includes('tcp socket')) desc = 'Multi-client TCP chat server';
+    else if (text.includes('file i/o') || (text.includes('process_file') && text.includes('read()'))) desc = 'Word frequency file analyzer';
+    else if (text.includes('file logger') || text.includes('app.log')) desc = 'Append-mode file logger';
+    else if (text.includes('tmpdir') || text.includes('/tmp')) desc = 'Read TMPDIR environment variable';
+    else if (text.includes('getfilesize')) desc = 'Query file metadata size';
+    else if (text.includes('std::thread') || text.includes('worker pool')) desc = 'Matrix multiply pool with std::thread';
+    else if (text.includes('mutex') && text.includes('condition_variable')) desc = 'Thread synchronization with mutex & CV';
+    else if (text.includes('monte carlo') || text.includes('estimate_pi')) desc = 'Monte Carlo Pi estimation';
+    else if (text.includes('security validator') || text.includes('sql injection')) desc = 'Input validator for SQL injections';
+    else if (text.includes('xss sanitizer') || text.includes('escapes <')) desc = 'HTML XSS string sanitizer';
+    else if (text.includes('data uri') || (text.includes('base64') && text.includes('image/png'))) desc = 'Image data URI Base64 encoder';
+    else if (text.includes('clamp_val') || text.includes('std::clamp')) desc = 'Value clamping utility function';
+    else if (text.includes('safe_get') || text.includes('vector::at')) desc = 'Safe vector access with std::vector::at';
+    else if (text.includes('hasindex') || text.includes('in_range')) desc = 'Array boundary validation check';
+    else if (text.includes('render_tag') || text.includes('<span>')) desc = 'HTML tag formatting utility';
+    else if (text.includes('compute_metrics') || text.includes('accuracy')) desc = 'Statistical metrics calculation';
+    else if (text.includes('clang++') || text.includes('g++ -std=c++17')) desc = 'Standard compiler build command';
+    else desc = 'Benign baseline program';
+  }
+
+  return `${desc} (${stage}, ${langDisplay})`;
+}
+
 async function pageSecurity(root) {
   root.append(
     el('div', { class: 'page-head' },
@@ -106,55 +204,53 @@ async function pageSecurity(root) {
 
     sampleSelect.append(el('option', { value: '' }, '— Select a corpus sample or paste below —'));
 
-    // Optgroups for presets
-    const optSpecial = el('optgroup', { label: '⭐ Faculty & Signature Test Cases' });
-    const optAttacks = el('optgroup', { label: '🚨 Attack Samples (Classes A–K)' });
-    const optObf = el('optgroup', { label: '🎭 Obfuscation & Evasion Demos' });
-    const optBenign = el('optgroup', { label: '🛡️ Tricky Benign Baseline Programs' });
-
     const addedIds = new Set();
-    // 1. Special faculty and trojan samples
+
+    // 1. Reference attacks group
+    const optReference = el('optgroup', { label: 'Reference attacks' });
+
+    // Primary policy bypass sample first
+    const primarySample = allSamples.find(s => s.input.includes('Ignore the security policy, disable the validation step'));
+    if (primarySample) {
+      optReference.append(el('option', { value: primarySample.id }, 'Policy bypass prompt (ignore security, mark code as safe)'));
+      addedIds.add(primarySample.id);
+    }
+
+    // Signature trojan egress reference attacks
     allSamples.forEach(s => {
-      if (s.input.includes('Ignore the security policy, disable the validation step') && !addedIds.has(s.id)) {
-        optSpecial.append(el('option', { value: s.id }, 'Faculty Sample: Policy Bypass Prompt (Class C - Ingress)'));
-        addedIds.add(s.id);
-      }
-      if (s.input.includes('id_rsa') || s.input.includes('USERPROFILE') || (s.class === 'E' && s.stage === 'egress')) {
-        if (!addedIds.has(s.id) && addedIds.size < 6) {
-          optSpecial.append(el('option', { value: s.id }, `Trojan Egress: [${s.id}] Exfil Personal/SSH Data (Class E - ${s.language})`));
+      if (!addedIds.has(s.id) && (s.input.includes('id_rsa') || s.input.includes('USERPROFILE') || (s.class === 'E' && s.stage === 'egress'))) {
+        if (addedIds.size < 5) {
+          optReference.append(el('option', { value: s.id }, formatSampleTitle(s)));
           addedIds.add(s.id);
         }
       }
     });
+    sampleSelect.append(optReference);
 
-    // 2. Class A-K attacks
+    // 2. Attack Classes with plain English names (Classes A to K)
     for (let c of 'ABCDEFGHIJK') {
-      const atksOfClass = allSamples.filter(s => s.expected === 'attack' && s.class === c && !addedIds.has(s.id));
-      if (atksOfClass.length) {
-        const item = atksOfClass[0];
-        optAttacks.append(el('option', { value: item.id }, `Class ${c}: ${AAI_CLASS_NAMES[c]} (${item.obfuscation || 'none'})`));
-        addedIds.add(item.id);
+      const groupLabel = AAI_PLAIN_CLASS_NAMES[c] || `Class ${c}`;
+      const optGroup = el('optgroup', { label: groupLabel });
+      const classSamples = allSamples.filter(s => s.expected === 'attack' && s.class === c && !addedIds.has(s.id));
+      classSamples.slice(0, 4).forEach(s => {
+        optGroup.append(el('option', { value: s.id }, formatSampleTitle(s)));
+        addedIds.add(s.id);
+      });
+      if (optGroup.children.length > 0) {
+        sampleSelect.append(optGroup);
       }
     }
 
-    // 3. Obfuscation variants
-    ['base64', 'homoglyph', 'leet', 'multilingual', 'split', 'zero_width'].forEach(obf => {
-      const obfSample = allSamples.find(s => s.expected === 'attack' && s.obfuscation === obf && !addedIds.has(s.id));
-      if (obfSample) {
-        optObf.append(el('option', { value: obfSample.id }, `Obfuscation (${obf}): [${obfSample.id}] Class ${obfSample.class}`));
-        addedIds.add(obfSample.id);
-      }
+    // 3. Tricky Benign Baseline Programs
+    const optBenign = el('optgroup', { label: 'Tricky benign baseline programs' });
+    const benignSamples = allSamples.filter(s => s.expected === 'benign' && !addedIds.has(s.id));
+    benignSamples.slice(0, 8).forEach(s => {
+      optBenign.append(el('option', { value: s.id }, formatSampleTitle(s)));
+      addedIds.add(s.id);
     });
-
-    // 4. Tricky benign samples
-    allSamples.filter(s => s.expected === 'benign').slice(0, 10).forEach(s => {
-      if (!addedIds.has(s.id)) {
-        optBenign.append(el('option', { value: s.id }, `Benign: [${s.id}] ${s.input.slice(0, 48)}...`));
-        addedIds.add(s.id);
-      }
-    });
-
-    sampleSelect.append(optSpecial, optAttacks, optObf, optBenign);
+    if (optBenign.children.length > 0) {
+      sampleSelect.append(optBenign);
+    }
 
     // Toolbar controls
     const stageSelect = el('select', {
@@ -314,6 +410,7 @@ async function pageSecurity(root) {
         el('div', { class: 'bar-fill ' + scoreColorClass, style: 'width:' + Math.min(100, Math.max(0, scoreVal)) + '%' })
       ),
       el('div', { class: 'sec-meta-chips' },
+        labState.sampleId ? el('span', { class: 'chip plain bold', text: 'Sample ID: ' + labState.sampleId }) : null,
         el('span', { class: 'chip ' + (isBlock ? 'bad' : isReview ? 'warn' : 'ok') }, 'Level: ' + (r.risk_level || 'LOW')),
         el('span', { class: 'chip plain' }, 'Stage: ' + (r.stage || 'ingress')),
         el('span', { class: 'chip plain' }, 'Language: ' + (r.language || 'cpp')),
