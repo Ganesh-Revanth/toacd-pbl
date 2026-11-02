@@ -1365,6 +1365,135 @@ table.data td.num, table.data th.num { text-align: right; }
   flex-direction: column;
   gap: 2px;
 }
+
+/* ── Energy Tab & Telemetry ────────────────────────────────────────────── */
+.energy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+.energy-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: var(--s3);
+}
+.energy-card .metric-val {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 6px 0;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.energy-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.energy-card-sub {
+  font-size: 11px;
+  margin-top: 4px;
+}
+.estimated-pill {
+  font-size: 10px;
+  padding: 1px 7px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.energy-est-expl {
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-top: 4px;
+}
+.energy-popover {
+  margin-top: 8px;
+  border-top: 1px dashed var(--line);
+  padding-top: 6px;
+  font-size: 11px;
+}
+.energy-pop-btn {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+}
+.energy-pop-btn:hover {
+  text-decoration: underline;
+}
+.energy-pop-body {
+  margin-top: 6px;
+  padding: 8px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.energy-pop-row {
+  word-break: break-word;
+}
+.energy-rapl-quiet {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin: 4px 0 16px;
+}
+.energy-section-card {
+  padding: var(--s4);
+}
+.energy-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.energy-chart-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+.energy-svg-chart {
+  width: 100%;
+  max-width: 640px;
+  height: auto;
+  display: block;
+}
+.energy-bar {
+  transition: opacity 120ms ease;
+  cursor: pointer;
+}
+.energy-bar:hover {
+  opacity: 0.8;
+  fill: var(--accent-hover, var(--accent));
+}
+.energy-cmp-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin-bottom: 12px;
+}
+.energy-saved-pill {
+  font-size: 13px;
+  padding: 6px 12px;
+}
+.energy-cmp-tbl {
+  width: 100%;
+  margin-top: 8px;
+}
+
 @media (max-width: 768px) {
   .sec-deobf-grid, .sec-curve-grid { grid-template-columns: 1fr; }
   .sec-actions { margin-left: 0; width: 100%; }

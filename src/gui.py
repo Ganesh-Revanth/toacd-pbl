@@ -245,27 +245,18 @@ class SparklineGraph(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(15)
         self.setMaximumHeight(40)
-        self.values = [0] * 50
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_fluctuation)
-        self.timer.start(200)
+        self.values = []
         self.peak = 0
 
-    def update_fluctuation(self):
-        # Base noise
-        import random
-        noise = random.uniform(0, 2)
-        self.add_value(noise)
-
     def add_value(self, val):
-        self.values.pop(0)
         self.values.append(val)
+        if len(self.values) > 50:
+            self.values.pop(0)
         self.update()
 
-    def trigger_spike(self):
-        import random
-        self.add_value(random.uniform(15, 25))
-        self.add_value(random.uniform(10, 15))
+    def clear(self):
+        self.values = []
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -356,6 +347,13 @@ class MetricsGraph(QWidget):
         painter.setPen(QColor(TEXT_DIM))
         painter.drawText(8, top + 5, "High")
         painter.drawText(12, top + height, "Low")
+
+        has_data = any(len(d) >= 2 and any(v > 0 for v in d) for d in self.series.values())
+        if not has_data:
+            painter.setFont(QFont(FONT_FAMILY, 11))
+            painter.setPen(QColor(TEXT_DIM))
+            painter.drawText(graph_rect, Qt.AlignmentFlag.AlignCenter, "No measurement yet")
+            return
 
         legend_x = left
         for name, color in self.colors.items():
@@ -1628,7 +1626,7 @@ class EnergyPage(CustomFrame):
         self.btn_download_csv.clicked.connect(self._download_csv)
         self.content_layout.addWidget(self.btn_download_csv, 0, Qt.AlignmentFlag.AlignRight)
 
-        self.update_metrics(0, 0, 0, "Unavailable", "CodeCarbon has not produced a sample yet.")
+        self.update_metrics(None, None, None, "Unavailable", "No measurement yet (CodeCarbon has not produced a sample).")
         
         self.csv_path = "emissions.csv"
         self.poll_timer = QTimer(self)
@@ -1693,11 +1691,17 @@ class EnergyPage(CustomFrame):
         return label
 
     def update_metrics(self, power_mw, carbon_mg_per_wh, execution_time, rapl_text, note):
-        self.power_value.setText(f"<span style='color:{TEXT_DIM};'>Power Usage</span><br><b style='color:{PINK}; font-size:18px;'>{power_mw:.3f} mW</b>")
-        self.carbon_value.setText(f"<span style='color:{TEXT_DIM};'>Carbon Intensity</span><br><b style='color:{GREEN}; font-size:18px;'>{carbon_mg_per_wh:.3f} mgCO2/Wh</b>")
-        self.time_value.setText(f"<span style='color:{TEXT_DIM};'>Execution Time</span><br><b style='color:{YELLOW}; font-size:18px;'>{execution_time:.3f} s</b>")
-        self.rapl_value.setText(f"<span style='color:{TEXT_DIM};'>RAPL</span><br><b style='color:{TEXT_MAIN}; font-size:16px;'>{rapl_text}</b>")
-        self.graph.add_sample(power_mw, carbon_mg_per_wh, execution_time)
+        if power_mw is None or carbon_mg_per_wh is None or execution_time is None:
+            self.power_value.setText(f"<span style='color:{TEXT_DIM};'>Power Usage</span><br><b style='color:{TEXT_DIM}; font-size:16px;'>No measurement yet</b>")
+            self.carbon_value.setText(f"<span style='color:{TEXT_DIM};'>Carbon Intensity</span><br><b style='color:{TEXT_DIM}; font-size:16px;'>No measurement yet</b>")
+            self.time_value.setText(f"<span style='color:{TEXT_DIM};'>Execution Time</span><br><b style='color:{TEXT_DIM}; font-size:16px;'>No measurement yet</b>")
+            self.rapl_value.setText(f"<span style='color:{TEXT_DIM};'>RAPL</span><br><b style='color:{TEXT_MAIN}; font-size:16px;'>{rapl_text}</b>")
+        else:
+            self.power_value.setText(f"<span style='color:{TEXT_DIM};'>Power Usage</span><br><b style='color:{PINK}; font-size:18px;'>{power_mw:.3f} mW</b>")
+            self.carbon_value.setText(f"<span style='color:{TEXT_DIM};'>Carbon Intensity</span><br><b style='color:{GREEN}; font-size:18px;'>{carbon_mg_per_wh:.3f} mgCO2/Wh</b>")
+            self.time_value.setText(f"<span style='color:{TEXT_DIM};'>Execution Time</span><br><b style='color:{YELLOW}; font-size:18px;'>{execution_time:.3f} s</b>")
+            self.rapl_value.setText(f"<span style='color:{TEXT_DIM};'>RAPL</span><br><b style='color:{TEXT_MAIN}; font-size:16px;'>{rapl_text}</b>")
+            self.graph.add_sample(power_mw, carbon_mg_per_wh, execution_time)
         self.notes.setHtml(f"""
             <b style="color:{PINK};">Telemetry source</b><br>
             {note}<br><br>
@@ -3163,16 +3167,14 @@ class AppGUI(QMainWindow):
                 and (cpu_kwh > 0 or ram_kwh > 0 or emissions_kg > 0)
             )
             if not has_sample:
-                t = time.monotonic()
-                base_mw = 900.0
-                wave = 120.0 * math.sin(t / 2.5) + 45.0 * math.sin(t / 0.9)
-                jitter = random.uniform(-18.0, 18.0)
-                power_mw = max(50.0, base_mw + wave + jitter)
-                carbon_mg_per_wh = max(0.05, 0.42 + 0.04 * math.sin(t / 4.0))
-                note = "Placeholder telemetry (CodeCarbon has not produced a sample yet)."
+                power_mw = None
+                carbon_mg_per_wh = None
+                elapsed_param = None
+                note = "No measurement yet (CodeCarbon has not produced a sample)."
             else:
                 power_mw = max(0.0, power_w * 1000.0)
                 carbon_mg_per_wh = max(0.0, carbon_g_per_kwh / 1000.0)
+                elapsed_param = elapsed
                 note = "CodeCarbon live tracker is active."
 
             rapl_now = _read_rapl_energy_joules()
@@ -3193,7 +3195,7 @@ class AppGUI(QMainWindow):
                 # Panel removed to focus on graph
                 pass
             if hasattr(self, 'energy_page'):
-                self.energy_page.update_metrics(power_mw, carbon_mg_per_wh, elapsed, rapl_text, note)
+                self.energy_page.update_metrics(power_mw, carbon_mg_per_wh, elapsed_param, rapl_text, note)
 
         except Exception as e:
             # print(f"Dashboard Error: {e}")

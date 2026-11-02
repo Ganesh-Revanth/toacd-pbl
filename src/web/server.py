@@ -56,6 +56,7 @@ if str(SRC_DIR) not in sys.path:
 
 from languages import Language, NotSupported, ToolchainNotFound, get_language, list_languages
 from languages.cpp import CppLanguage, OUT_NAME, _ERR_PATTERN
+from energy_meter import build_energy_object, compute_estimated_energy_joules, get_cpu_watts
 
 try:
     from aai_guardrail import AAIGuardrail, normalize, verify_log, GuardrailResult
@@ -286,6 +287,8 @@ def api_cpp_run(body: Dict[str, Any]) -> Dict[str, Any]:
     result["analysis"] = analysis
 
     if result["ran"]:
+        energy_obj = build_energy_object(result, getattr(lang, "last_compile_metrics", None))
+        result["energy"] = energy_obj
         run_obj = {
             "stdout": result.get("stdout", ""),
             "stderr": result.get("stderr", ""),
@@ -298,12 +301,14 @@ def api_cpp_run(body: Dict[str, Any]) -> Dict[str, Any]:
             "timeout_s": RUN_TIMEOUT_S,
             "elapsed_ms": int(result.get("run_s", elapsed_s) * 1000) if "run_s" in result else int(elapsed_s * 1000),
             "elapsed_s": result.get("run_s", elapsed_s),
+            "energy": energy_obj,
         }
         result["run"] = run_obj
         result["elapsed_ms"] = run_obj["elapsed_ms"]
         result["truncated"] = run_obj["truncated"]
     else:
         result["run"] = None
+        result["energy"] = None
 
     return result
 
@@ -985,6 +990,158 @@ def api_aai_metrics() -> Dict[str, Any]:
         return json.load(f)
 
 
+def api_energy_compare(body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build C or C++ code with -O0 and -O2, run each 3 times with the same stdin (5 s limit),
+    and return median wall time, CPU time, estimated energy, and savings.
+    Flags undefined behaviour if -O0 and -O2 outputs differ.
+    """
+    if not RUN_ENABLED:
+        raise ApiError("Running programs is disabled because the server is not bound to this machine only.", 403)
+
+    code = _need_code(body)
+    lang_name = body.get("language") or body.get("lang") or "cpp"
+    lang_id = str(lang_name).lower().strip()
+    if lang_id not in ("cpp", "c"):
+        raise ApiError("Optimization comparison (-O0 vs -O2) is only available for C and C++.", 400)
+
+    lang = get_language(lang_id)
+    if not lang or not lang.toolchain_available():
+        raise ApiError(f"{lang_id.upper()} compiler toolchain was not found on this machine.", 503)
+
+    safe, reason = lang.is_safe(code)
+    if not safe:
+        raise ApiError(f"Security Error: {reason}", 400)
+
+    stdin_text = body.get("stdin", "")
+    if not isinstance(stdin_text, str) or len(stdin_text) > RUN_STDIN_CAP:
+        raise ApiError("stdin must be text of at most 64 KB.", 400)
+
+    import statistics
+    from compiler_runner import get_compiler_cmd_and_env
+    from languages.c import _find_gcc
+
+    if lang_id == "cpp":
+        compiler_cmd, env = get_compiler_cmd_and_env()
+        base_args = [compiler_cmd, "-std=c++17", "-Wall"]
+        ext = ".cpp"
+    else:
+        compiler_cmd, env = _find_gcc()
+        base_args = [compiler_cmd, "-std=c11", "-Wall", "-Werror=implicit-function-declaration"]
+        ext = ".c"
+
+    env = {**env, "LC_ALL": "C", "LANGUAGE": "C"}
+    cpu_watts = get_cpu_watts()
+
+    with tempfile.TemporaryDirectory(prefix="energy_cmp_", ignore_cleanup_errors=True) as wd:
+        src = os.path.join(wd, f"main{ext}")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(code)
+
+        exe_o0 = os.path.join(wd, "out_o0.exe" if os.name == "nt" else "out_o0.bin")
+        exe_o2 = os.path.join(wd, "out_o2.exe" if os.name == "nt" else "out_o2.bin")
+
+        # 1. Compile -O0
+        cmd_o0 = base_args + ["-O0", src, "-o", exe_o0]
+        res_o0 = subprocess.run(cmd_o0, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=wd, env=env, timeout=COMPILE_TIMEOUT_S)
+        if res_o0.returncode != 0:
+            raise ApiError(f"Compilation with -O0 failed:\n{res_o0.stderr.strip()}", 400)
+
+        # 2. Compile -O2
+        cmd_o2 = base_args + ["-O2", src, "-o", exe_o2]
+        res_o2 = subprocess.run(cmd_o2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=wd, env=env, timeout=COMPILE_TIMEOUT_S)
+        if res_o2.returncode != 0:
+            raise ApiError(f"Compilation with -O2 failed:\n{res_o2.stderr.strip()}", 400)
+
+        # 3. Run -O0 3 times
+        runs_o0 = []
+        for _ in range(3):
+            r = lang._run_binary(exe_o0, wd, stdin_text, env, timeout=RUN_TIMEOUT_S)
+            wall = float(r.get("wall_s") if r.get("wall_s") is not None else r.get("run_s", 0.0))
+            cpu = float(r.get("cpu_s") if r.get("cpu_s") is not None else 0.0)
+            energy_j = compute_estimated_energy_joules(cpu, cpu_watts) or 0.0
+            runs_o0.append({
+                "wall_s": wall,
+                "cpu_s": cpu,
+                "est_energy_j": energy_j,
+                "stdout": r.get("stdout", ""),
+                "stderr": r.get("stderr", ""),
+                "exit_code": r.get("exit_code", 0),
+                "timed_out": bool(r.get("timed_out")),
+            })
+
+        # 4. Run -O2 3 times
+        runs_o2 = []
+        for _ in range(3):
+            r = lang._run_binary(exe_o2, wd, stdin_text, env, timeout=RUN_TIMEOUT_S)
+            wall = float(r.get("wall_s") if r.get("wall_s") is not None else r.get("run_s", 0.0))
+            cpu = float(r.get("cpu_s") if r.get("cpu_s") is not None else 0.0)
+            energy_j = compute_estimated_energy_joules(cpu, cpu_watts) or 0.0
+            runs_o2.append({
+                "wall_s": wall,
+                "cpu_s": cpu,
+                "est_energy_j": energy_j,
+                "stdout": r.get("stdout", ""),
+                "stderr": r.get("stderr", ""),
+                "exit_code": r.get("exit_code", 0),
+                "timed_out": bool(r.get("timed_out")),
+            })
+
+    med_o0_wall = round(statistics.median([r["wall_s"] for r in runs_o0]), 4)
+    med_o0_cpu = round(statistics.median([r["cpu_s"] for r in runs_o0]), 4)
+    med_o0_energy = round(statistics.median([r["est_energy_j"] for r in runs_o0]), 4)
+
+    med_o2_wall = round(statistics.median([r["wall_s"] for r in runs_o2]), 4)
+    med_o2_cpu = round(statistics.median([r["cpu_s"] for r in runs_o2]), 4)
+    med_o2_energy = round(statistics.median([r["est_energy_j"] for r in runs_o2]), 4)
+
+    def calc_pct(o0_val: float, o2_val: float) -> float:
+        if o0_val > 0.0:
+            return round((o0_val - o2_val) / o0_val * 100.0, 1)
+        return 0.0
+
+    energy_saved_pct = calc_pct(med_o0_energy, med_o2_energy)
+    wall_saved_pct = calc_pct(med_o0_wall, med_o2_wall)
+    cpu_saved_pct = calc_pct(med_o0_cpu, med_o2_cpu)
+
+    out_o0 = runs_o0[0]["stdout"].strip()
+    out_o2 = runs_o2[0]["stdout"].strip()
+    code_o0 = runs_o0[0]["exit_code"]
+    code_o2 = runs_o2[0]["exit_code"]
+
+    outputs_differ = (out_o0 != out_o2) or (code_o0 != code_o2)
+    diff_warning = (
+        "Outputs differ between -O0 and -O2: possible undefined behaviour detected."
+        if outputs_differ else None
+    )
+
+    return {
+        "ok": True,
+        "language": lang_id,
+        "runs_count": 3,
+        "o0": {
+            "median_wall_s": med_o0_wall,
+            "median_cpu_s": med_o0_cpu,
+            "median_energy_j": med_o0_energy,
+            "runs": runs_o0,
+        },
+        "o2": {
+            "median_wall_s": med_o2_wall,
+            "median_cpu_s": med_o2_cpu,
+            "median_energy_j": med_o2_energy,
+            "runs": runs_o2,
+        },
+        "saved": {
+            "energy_pct": energy_saved_pct,
+            "wall_pct": wall_saved_pct,
+            "cpu_pct": cpu_saved_pct,
+            "energy_j": round(max(0.0, med_o0_energy - med_o2_energy), 4),
+        },
+        "outputs_differ": outputs_differ,
+        "diff_warning": diff_warning,
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # HTTP layer
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1003,6 +1160,8 @@ POST_ROUTES = {
     "/api/samples": lambda body: api_samples(body.get("language", body.get("lang", "cpp"))),
     "/api/aai/scan": api_aai_scan,
     "/api/aai/verify-log": lambda _b: api_aai_verify_log(),
+    "/api/energy/compare": api_energy_compare,
+    "/api/cpp/energy/compare": api_energy_compare,
 }
 GET_ROUTES = {
     "/api/status": api_status,

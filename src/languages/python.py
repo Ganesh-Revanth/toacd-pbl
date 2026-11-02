@@ -16,6 +16,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Language, NotSupported, ToolchainNotFound, _scrub_paths, _to_jsonable
+from energy_meter import ProcessMonitor, read_rapl_energy_joules, is_psutil_available
 
 COMPILE_TIMEOUT_S = 10
 RUN_TIMEOUT_S = 5
@@ -67,6 +68,7 @@ class PythonLanguage(Language):
 
     def __init__(self) -> None:
         self.last_stderr: str = ""
+        self.last_compile_metrics: Dict[str, Optional[float]] = {"wall_s": None, "cpu_s": None}
 
     def toolchain_available(self) -> bool:
         """Check whether python runtime is available."""
@@ -208,20 +210,32 @@ class PythonLanguage(Language):
                 "confidence": 1.0,
             }]
 
+        t_comp_start = time.perf_counter()
         try:
-            res = subprocess.run(
+            proc = subprocess.Popen(
                 [sys.executable, "-I", "-m", "py_compile", src],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=workdir,
-                timeout=COMPILE_TIMEOUT_S,
             )
+            monitor = ProcessMonitor(proc.pid, interval=0.01)
+            monitor.start()
+            out, err = proc.communicate(timeout=COMPILE_TIMEOUT_S)
+            monitor.stop(proc)
+            comp_wall = time.perf_counter() - t_comp_start
+            self.last_compile_metrics = {
+                "wall_s": round(comp_wall, 4) if is_psutil_available() else None,
+                "cpu_s": round(monitor.cpu_time_s, 4) if is_psutil_available() else None,
+            }
+            res = subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
         except FileNotFoundError:
             self.last_stderr = "python interpreter not found"
+            self.last_compile_metrics = {"wall_s": None, "cpu_s": None}
             raise ToolchainNotFound("Python was not found on this machine. Install Python 3 and restart.")
         except subprocess.TimeoutExpired:
             self.last_stderr = "timeout"
+            self.last_compile_metrics = {"wall_s": None, "cpu_s": None}
             return [{
                 "file": src,
                 "line": 1,
@@ -400,6 +414,7 @@ class PythonLanguage(Language):
 
         stdin_data = (stdin or "")[:RUN_STDIN_CAP]
         t_limit = min(max(0.5, float(timeout)), RUN_TIMEOUT_S)
+        t0 = time.perf_counter()
 
         try:
             proc = subprocess.Popen(
@@ -410,6 +425,9 @@ class PythonLanguage(Language):
                 text=True,
                 cwd=workdir,
             )
+            monitor = ProcessMonitor(proc.pid, interval=0.01)
+            monitor.start()
+            rapl_start = read_rapl_energy_joules()
             try:
                 out, err = proc.communicate(input=stdin_data, timeout=t_limit)
                 timed_out = False
@@ -421,6 +439,9 @@ class PythonLanguage(Language):
                 code_ret = -1
                 err = (err or "") + f"\nExecution timed out (limit: {t_limit:.1f} s)."
             finally:
+                monitor.stop(proc)
+                rapl_end = read_rapl_energy_joules()
+                wall_s = time.perf_counter() - t0
                 if proc.stdout:
                     proc.stdout.close()
                 if proc.stderr:
@@ -431,7 +452,14 @@ class PythonLanguage(Language):
                 "stderr": f"Runtime execution failed: {type(e).__name__}: {e}",
                 "exit_code": 1,
                 "timed_out": False,
+                "wall_s": None,
+                "cpu_s": None,
+                "peak_mem_mb": None,
+                "rapl_j": None,
             }
+
+        rapl_j = max(0.0, rapl_end - rapl_start) if (rapl_start is not None and rapl_end is not None) else None
+        metrics = monitor.get_metrics(wall_s=wall_s)
 
         truncated = False
         # Truncate output at 64 KB
@@ -453,6 +481,11 @@ class PythonLanguage(Language):
             "exit_code": code_ret,
             "timed_out": timed_out,
             "truncated": truncated,
+            "run_s": round(wall_s, 3),
+            "wall_s": metrics["wall_s"],
+            "cpu_s": metrics["cpu_s"],
+            "peak_mem_mb": metrics["peak_mem_mb"],
+            "rapl_j": rapl_j,
         }
 
     def tree(self, code: str) -> List[Dict[str, Any]]:

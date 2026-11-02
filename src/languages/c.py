@@ -17,6 +17,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Language, NotSupported, ToolchainNotFound, _scrub_paths, _to_jsonable
+from energy_meter import ProcessMonitor, read_rapl_energy_joules, is_psutil_available
 
 COMPILE_TIMEOUT_S = 30
 RUN_TIMEOUT_S = 5
@@ -82,6 +83,7 @@ class CLanguage(Language):
 
     def __init__(self) -> None:
         self.last_stderr: str = ""
+        self.last_compile_metrics: Dict[str, Optional[float]] = {"wall_s": None, "cpu_s": None}
 
     def is_safe(self, code: str) -> Tuple[bool, str]:
         """Check if code avoids forbidden system calls, shellcode, or dangerous includes."""
@@ -117,18 +119,31 @@ class CLanguage(Language):
         gcc, env = _find_gcc()
         env = {**env, "LC_ALL": "C", "LANGUAGE": "C"}
         out_path = os.path.join(workdir, OUT_NAME)
+        t_comp_start = time.perf_counter()
         try:
-            res = subprocess.run(
+            proc = subprocess.Popen(
                 [gcc, "-std=c11", "-Wall", "-Werror=implicit-function-declaration", src, "-o", out_path],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 encoding="utf-8", errors="replace", env=env,
-                cwd=workdir, timeout=COMPILE_TIMEOUT_S,
+                cwd=workdir,
             )
+            monitor = ProcessMonitor(proc.pid, interval=0.01)
+            monitor.start()
+            out, err = proc.communicate(timeout=COMPILE_TIMEOUT_S)
+            monitor.stop(proc)
+            comp_wall = time.perf_counter() - t_comp_start
+            self.last_compile_metrics = {
+                "wall_s": round(comp_wall, 4) if is_psutil_available() else None,
+                "cpu_s": round(monitor.cpu_time_s, 4) if is_psutil_available() else None,
+            }
+            res = subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
         except FileNotFoundError:
             self.last_stderr = "gcc not found"
+            self.last_compile_metrics = {"wall_s": None, "cpu_s": None}
             raise ToolchainNotFound("gcc was not found on this machine. Install a C toolchain and restart.")
         except subprocess.TimeoutExpired:
             self.last_stderr = "timeout"
+            self.last_compile_metrics = {"wall_s": None, "cpu_s": None}
             return [{
                 "file": src, "line": 1, "column": 1, "type": "error",
                 "message": f"Compilation timed out after {COMPILE_TIMEOUT_S}s.",
@@ -173,12 +188,16 @@ class CLanguage(Language):
 
     def _run_binary(self, exe: str, workdir: str, stdin_text: str, env: Dict[str, str], timeout: float = RUN_TIMEOUT_S) -> Dict[str, Any]:
         """Run a compiled C program with a timeout, output cap and resource limits."""
-        t0 = time.time()
+        t0 = time.perf_counter()
         kw: Dict[str, Any] = {}
         if os.name != "nt":
             kw["preexec_fn"] = _limit_child
         proc = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=workdir, env=env, **kw)
+        monitor = ProcessMonitor(proc.pid, interval=0.01)
+        monitor.start()
+        rapl_start = read_rapl_energy_joules()
+
         chunks = {"out": bytearray(), "err": bytearray()}
         truncated = threading.Event()
 
@@ -222,6 +241,11 @@ class CLanguage(Language):
             timed_out = True
             proc.kill()
             proc.wait()
+
+        monitor.stop(proc)
+        rapl_end = read_rapl_energy_joules()
+        wall_s = time.perf_counter() - t0
+
         for r in readers:
             r.join(timeout=1)
         for s in (proc.stdout, proc.stderr):
@@ -231,6 +255,9 @@ class CLanguage(Language):
                 except Exception:
                     pass
         code = proc.returncode
+        rapl_j = max(0.0, rapl_end - rapl_start) if (rapl_start is not None and rapl_end is not None) else None
+        metrics = monitor.get_metrics(wall_s=wall_s)
+
         return {
             "stdout": chunks["out"].decode("utf-8", "replace"),
             "stderr": chunks["err"].decode("utf-8", "replace"),
@@ -238,7 +265,11 @@ class CLanguage(Language):
             "timed_out": timed_out,
             "truncated": truncated.is_set(),
             "crashed": (not timed_out) and not truncated.is_set() and code is not None and (code < 0 or code >= 0xC0000000),
-            "run_s": round(time.time() - t0, 3),
+            "run_s": round(wall_s, 3),
+            "wall_s": metrics["wall_s"],
+            "cpu_s": metrics["cpu_s"],
+            "peak_mem_mb": metrics["peak_mem_mb"],
+            "rapl_j": rapl_j,
         }
 
     def tree(self, code: str) -> Any:

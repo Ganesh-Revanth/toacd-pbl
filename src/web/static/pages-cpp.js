@@ -73,6 +73,165 @@ const SUPPORTED_LANGUAGES = [
 const DEFAULT_FILENAMES = { cpp: 'main.cpp', c: 'main.c', python: 'main.py', java: 'Main.java' };
 const CODE_ACCEPT = '.cpp,.cc,.cxx,.c++,.c,.h,.hpp,.hh,.py,.pyw,.java,.txt';
 
+/* ── Energy Telemetry Helpers ──────────────────────────────────────────── */
+function getEnergyHistory() {
+  try {
+    const raw = localStorage.getItem('studio:energy_history');
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    return [];
+  }
+}
+function pushEnergyHistory(entry) {
+  try {
+    const list = getEnergyHistory();
+    list.push(entry);
+    while (list.length > 20) list.shift();
+    localStorage.setItem('studio:energy_history', JSON.stringify(list));
+  } catch (e) {}
+}
+function clearEnergyHistory() {
+  try {
+    localStorage.removeItem('studio:energy_history');
+  } catch (e) {}
+}
+
+function formatTime(s) {
+  if (s == null) return '—';
+  if (s < 0.001) return (s * 1000000).toFixed(0) + ' µs';
+  if (s < 1) return (s * 1000).toFixed(1) + ' ms';
+  return s.toFixed(3) + ' s';
+}
+function formatEnergy(j) {
+  if (j == null) return '—';
+  if (j < 0.001) return (j * 1000).toFixed(3) + ' mJ';
+  if (j < 1) return (j * 1000).toFixed(2) + ' mJ';
+  return j.toFixed(4) + ' J';
+}
+function formatCO2(mg) {
+  if (mg == null) return '—';
+  if (mg < 0.001) return (mg * 1000).toFixed(2) + ' µg';
+  if (mg < 1) return mg.toFixed(3) + ' mg';
+  return mg.toFixed(2) + ' mg';
+}
+
+function makePopover(title, rows) {
+  const pop = el('div', { class: 'energy-popover' });
+  const body = el('div', { class: 'energy-pop-body', hidden: true },
+    rows.map(r => el('div', { class: 'energy-pop-row' }, el('b', { text: r[0] + ': ' }), r[1]))
+  );
+  const btn = el('span', {
+    class: 'energy-pop-btn',
+    role: 'button',
+    tabindex: '0',
+    'aria-expanded': 'false',
+    onClick: () => {
+      const open = body.hidden;
+      body.hidden = !open;
+      btn.setAttribute('aria-expanded', String(open));
+      btn.textContent = open ? '▲ Hide assumptions' : '▼ View assumptions';
+    }
+  }, '▼ View assumptions');
+  pop.append(btn, body);
+  return pop;
+}
+
+function renderEnergyChart(history, onClear) {
+  const chartCard = el('div', { class: 'panel energy-section-card' },
+    el('div', { class: 'energy-sec-head' },
+      el('h3', { text: 'Estimated Energy History (Last 20 Runs)' }),
+      el('div', { class: 'actions' },
+        el('button', {
+          class: 'btn quiet',
+          disabled: !history || history.length === 0,
+          onClick: onClear
+        }, 'Clear history')
+      )
+    )
+  );
+
+  const wrap = el('div', { class: 'energy-chart-wrap' });
+  const w = 620, h = 180;
+  const padL = 60, padR = 25, padT = 25, padB = 35;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+  const svgKids = [];
+
+  // Axes lines
+  svgKids.push(
+    svg('line', { x1: padL, y1: padT, x2: padL, y2: padT + plotH, stroke: 'var(--line)', 'stroke-width': '1' }),
+    svg('line', { x1: padL, y1: padT + plotH, x2: padL + plotW, y2: padT + plotH, stroke: 'var(--line)', 'stroke-width': '1' })
+  );
+
+  if (!history || history.length === 0) {
+    svgKids.push(
+      svg('text', {
+        x: w / 2, y: padT + plotH / 2,
+        fill: 'var(--ink-3)', 'font-size': '13',
+        'text-anchor': 'middle'
+      }, 'No runs recorded in history yet. Click Compile & Run to measure energy.')
+    );
+  } else {
+    const maxVal = Math.max(...history.map(item => (typeof item.energy_j === 'number' ? item.energy_j : 0)), 0.0005);
+    const yMax = maxVal * 1.2;
+
+    const ticks = [0, yMax / 2, yMax];
+    ticks.forEach(tVal => {
+      const y = padT + plotH - (tVal / yMax) * plotH;
+      svgKids.push(
+        svg('line', { x1: padL - 4, y1: y, x2: padL + plotW, y2: y, stroke: 'var(--line)', 'stroke-dasharray': '2 3', 'stroke-width': '1' }),
+        svg('text', { x: padL - 8, y: y + 4, fill: 'var(--ink-3)', 'font-size': '10', 'text-anchor': 'end' }, (tVal < 0.01 ? (tVal * 1000).toFixed(1) + ' mJ' : tVal.toFixed(3) + ' J'))
+      );
+    });
+
+    const count = history.length;
+    const slotW = plotW / Math.max(count, 10);
+    const barW = Math.max(6, Math.min(26, slotW * 0.65));
+
+    history.forEach((run, idx) => {
+      const eVal = typeof run.energy_j === 'number' ? run.energy_j : 0;
+      const barH = Math.max(2, (eVal / yMax) * plotH);
+      const x = padL + idx * slotW + (slotW - barW) / 2;
+      const y = padT + plotH - barH;
+
+      const titleNode = svg('title', {}, `${run.label || 'Run ' + (idx + 1)}: ${formatEnergy(run.energy_j)} (CPU: ${formatTime(run.cpu_s)})`);
+      svgKids.push(
+        svg('rect', {
+          class: 'energy-bar',
+          x: x, y: y,
+          width: barW, height: barH,
+          rx: 3,
+          fill: 'var(--accent)'
+        }, titleNode),
+        svg('text', {
+          x: x + barW / 2, y: padT + plotH + 16,
+          fill: 'var(--ink-3)', 'font-size': '10',
+          'text-anchor': 'middle'
+        }, `#${idx + 1}`)
+      );
+    });
+  }
+
+  svgKids.push(
+    svg('text', {
+      x: padL, y: padT - 8,
+      fill: 'var(--ink-3)', 'font-size': '11', 'font-weight': '600',
+      'text-anchor': 'start'
+    }, 'Energy (J)')
+  );
+
+  const chartSvg = svg('svg', {
+    viewBox: `0 0 ${w} ${h}`,
+    class: 'energy-svg-chart',
+    role: 'img',
+    'aria-label': 'Estimated energy bar chart for last 20 runs'
+  }, svgKids);
+
+  wrap.append(chartSvg);
+  chartCard.append(wrap);
+  return chartCard;
+}
+
 function detectLanguageFromFilename(filename) {
   if (!filename) return null;
   const ext = '.' + filename.split('.').pop().toLowerCase();
@@ -94,12 +253,16 @@ function pageWorkspace(root) {
   s.filename = s.filename || DEFAULT_FILENAMES[s.language] || 'main.cpp';
   s.stdin = s.stdin || '';
   s.tab = s.tab || 'output';
+  s.energy = s.energy || null;
   if (s.baseline === undefined) s.baseline = s.code;
   const aiOK = state.status.ai_ready;
   let working = null;          // null | 'compile' | 'run' | 'heal'
   let flash = null;            // a one-off message shown at the top of the Output tab
   let healNote = null;         // "no change proposed" explanation
   let lastDecisionNote = null;
+  let cmpResult = null;
+  let cmpLoading = false;
+  let cmpError = null;
 
   /* ── editor ── */
   const cursorInfo = el('span', { text: 'Ln 1, Col 1' });
@@ -217,7 +380,8 @@ function pageWorkspace(root) {
     ed.set(s.code);
     setFile(s.filename);
     s.baseline = s.code;
-    s.result = null; s.run = null; s.pending = null; s.lastCheckedCode = null;
+    s.result = null; s.run = null; s.energy = null; s.pending = null; s.lastCheckedCode = null;
+    cmpResult = null; cmpError = null;
     s.tab = 'output'; flash = null; healNote = null; lastDecisionNote = null;
     ed.mark({}); renderResults(); updateStale(); updateInputHint();
     announce('Switched to ' + (SUPPORTED_LANGUAGES.find(l => l.id === newLang)?.name || newLang));
@@ -232,7 +396,8 @@ function pageWorkspace(root) {
     if (s.code.trim() && s.code !== s.baseline && s.code !== text &&
         !window.confirm('Replace the code in the editor? Your unsaved changes will be lost.')) return;
     ed.set(text); setFile(name || s.filename); s.baseline = text;
-    s.result = null; s.run = null; s.pending = null; s.lastCheckedCode = null; s.tab = 'output';
+    s.result = null; s.run = null; s.energy = null; s.pending = null; s.lastCheckedCode = null; s.tab = 'output';
+    cmpResult = null; cmpError = null;
     flash = null; healNote = null; lastDecisionNote = null; ed.mark({});
     renderResults(); updateStale(); announce('Loaded ' + (name || 'example'));
   }
@@ -256,7 +421,7 @@ function pageWorkspace(root) {
   function updateInputHint() { inputHint.hidden = !(INPUT_RE.test(s.code) && !s.stdin.trim()); }
 
   /* ── results tabs ── */
-  const TABS = [['output', 'Output'], ['problems', 'Problems'], ['fix', 'Fix']];
+  const TABS = [['output', 'Output'], ['energy', 'Energy'], ['problems', 'Problems'], ['fix', 'Fix']];
   const tabBtn = {}, badge = {};
   const tabList = el('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Results' });
   const indicator = el('div', { class: 'tab-indicator', 'aria-hidden': 'true' });
@@ -291,7 +456,12 @@ function pageWorkspace(root) {
     badge.problems.className = 'badge' + (r && r.error_count ? ' bad' : ' warn');
     badge.fix.hidden = !(s.pending && s.pending.status === 'pending'); badge.fix.textContent = '1'; badge.fix.className = 'badge ok';
     panel.setAttribute('aria-labelledby', 'rtab-' + s.tab);
-    panel.replaceChildren(s.tab === 'problems' ? problemsView() : s.tab === 'fix' ? fixView() : outputView());
+    panel.replaceChildren(
+      s.tab === 'problems' ? problemsView() :
+      s.tab === 'fix' ? fixView() :
+      s.tab === 'energy' ? energyView() :
+      outputView()
+    );
     requestAnimationFrame(updateIndicator);
   }
 
@@ -437,6 +607,193 @@ function pageWorkspace(root) {
     return el('div', null, parts);
   }
 
+  /* ── Energy tab ── */
+  async function runCompare() {
+    const code = ed.get();
+    if (!code.trim()) {
+      flash = notice('warn', 'Write or open code first before comparing optimizations.');
+      s.tab = 'output';
+      renderResults();
+      return;
+    }
+    cmpLoading = true;
+    cmpError = null;
+    cmpResult = null;
+    renderResults();
+    try {
+      const data = await call('/api/energy/compare', {
+        code,
+        stdin: s.stdin,
+        language: s.language
+      });
+      if (!data.ok) {
+        cmpError = data.error || 'Optimization benchmark failed';
+      } else {
+        cmpResult = data;
+      }
+    } catch (err) {
+      cmpError = err.message;
+    } finally {
+      cmpLoading = false;
+      renderResults();
+    }
+  }
+
+  function renderCompareSection() {
+    const head = el('div', { class: 'energy-cmp-header' },
+      el('div', null,
+        el('h3', { text: 'Compiler Optimization Impact (-O0 vs -O2)' }),
+        el('p', { class: 'muted', style: 'margin:2px 0 0', text: 'Builds and runs your code 3 times each with -O0 and -O2 to measure efficiency gains.' })
+      ),
+      el('button', {
+        class: 'btn' + (cmpLoading ? ' busy' : ''),
+        disabled: cmpLoading,
+        onClick: runCompare
+      }, cmpLoading ? el('span', { class: 'spinner' }) : icon('play'), cmpLoading ? ' Benchmarking…' : ' Compare -O0 and -O2')
+    );
+
+    const body = el('div');
+    if (cmpError) {
+      body.append(notice('bad', el('b', { text: 'Comparison failed: ' }), cmpError));
+    } else if (cmpResult) {
+      const parts = [];
+      if (cmpResult.outputs_differ) {
+        parts.push(notice('bad', el('b', { text: '⚠️ Potential Undefined Behaviour: ' }), cmpResult.diff_warning || 'The outputs of -O0 and -O2 differed!'));
+      }
+      const sv = cmpResult.saved || {};
+      const pill = sv.energy_pct != null
+        ? el('div', { style: 'margin-bottom:10px' },
+            el('span', { class: 'chip ok energy-saved-pill' }, '⚡ ' + sv.energy_pct + '% estimated energy saved with -O2' + (sv.energy_j ? ' (' + sv.energy_j + ' J)' : ''))
+          )
+        : null;
+
+      const tbl = el('table', { class: 'tbl energy-cmp-tbl' },
+        el('thead', null,
+          el('tr', null,
+            el('th', { text: 'Metric (Median of 3)' }),
+            el('th', { text: '-O0 (Baseline)' }),
+            el('th', { text: '-O2 (Optimized)' }),
+            el('th', { text: 'Savings' })
+          )
+        ),
+        el('tbody', null,
+          el('tr', null,
+            el('td', null, el('b', { text: 'Estimated Energy' })),
+            el('td', { text: formatEnergy(cmpResult.o0?.median_energy_j) }),
+            el('td', { text: formatEnergy(cmpResult.o2?.median_energy_j) }),
+            el('td', null, el('b', { text: sv.energy_pct != null ? sv.energy_pct + '%' : '—' }))
+          ),
+          el('tr', null,
+            el('td', null, el('b', { text: 'CPU Time' })),
+            el('td', { text: formatTime(cmpResult.o0?.median_cpu_s) }),
+            el('td', { text: formatTime(cmpResult.o2?.median_cpu_s) }),
+            el('td', { text: sv.cpu_pct != null ? sv.cpu_pct + '%' : '—' })
+          ),
+          el('tr', null,
+            el('td', null, el('b', { text: 'Run Time (Wall)' })),
+            el('td', { text: formatTime(cmpResult.o0?.median_wall_s) }),
+            el('td', { text: formatTime(cmpResult.o2?.median_wall_s) }),
+            el('td', { text: sv.wall_pct != null ? sv.wall_pct + '%' : '—' })
+          )
+        )
+      );
+      body.append(pill, tbl);
+    }
+
+    return el('div', { class: 'panel energy-section-card', style: 'margin-top:16px' }, head, body);
+  }
+
+  function energyView() {
+    if (working === 'run') return workingView();
+    const en = s.energy;
+    const parts = [];
+
+    if (!en && !s.run) {
+      parts.push(el('div', { class: 'empty' },
+        el('b', { text: 'No energy measurement yet' }),
+        'Press ', el('b', { text: 'Compile & Run' }), ' to execute your program and measure CPU time, memory, estimated energy, and carbon footprint.'
+      ));
+    } else if (en) {
+      const assump = en.assumptions || {};
+      const cards = [
+        el('div', { class: 'panel energy-card' },
+          el('div', { class: 'energy-card-header' }, el('b', { text: 'Run time' })),
+          el('div', { class: 'metric-val' }, formatTime(en.wall_s)),
+          el('div', { class: 'energy-card-sub muted', text: en.compile_wall_s != null ? 'Compile: ' + formatTime(en.compile_wall_s) : 'Wall clock' })
+        ),
+        el('div', { class: 'panel energy-card' },
+          el('div', { class: 'energy-card-header' }, el('b', { text: 'CPU time' })),
+          el('div', { class: 'metric-val' }, formatTime(en.cpu_s)),
+          el('div', { class: 'energy-card-sub muted', text: en.compile_cpu_s != null ? 'Compile: ' + formatTime(en.compile_cpu_s) : 'User + system' })
+        ),
+        el('div', { class: 'panel energy-card' },
+          el('div', { class: 'energy-card-header' }, el('b', { text: 'Peak memory' })),
+          el('div', { class: 'metric-val' }, en.peak_mem_mb != null ? en.peak_mem_mb.toFixed(2) + ' MB' : '—'),
+          el('div', { class: 'energy-card-sub muted', text: 'Child process RSS' })
+        ),
+        el('div', { class: 'panel energy-card' },
+          el('div', { class: 'energy-card-header' },
+            el('b', { text: 'Estimated energy' }),
+            el('span', { class: 'chip warn estimated-pill' }, 'Estimated')
+          ),
+          el('div', { class: 'metric-val' }, formatEnergy(en.est_energy_j)),
+          el('div', { class: 'energy-est-expl', text: 'from CPU time, not a power meter' }),
+          makePopover('Assumptions', [
+            ['Method', en.method || 'estimated from CPU time'],
+            ['Assumed CPU power', (assump.cpu_watts || 15) + ' W (ENERGY_CPU_WATTS)'],
+            ['Formula', 'E (J) = CPU_time (s) × CPU_watts (W)']
+          ])
+        ),
+        el('div', { class: 'panel energy-card' },
+          el('div', { class: 'energy-card-header' },
+            el('b', { text: 'Estimated CO₂' }),
+            el('span', { class: 'chip warn estimated-pill' }, 'Estimated')
+          ),
+          el('div', { class: 'metric-val' }, formatCO2(en.est_co2_mg)),
+          el('div', { class: 'energy-est-expl', text: 'from CPU time, not a power meter' }),
+          makePopover('Assumptions', [
+            ['Grid intensity', (assump.grid_g_per_kwh || 475) + ' g CO₂/kWh (GRID_G_CO2_PER_KWH)'],
+            ['Grid source', assump.grid_source || 'CodeCarbon global average / IEA'],
+            ['Formula', 'CO₂ (mg) = E (J) / 3.6e6 × intensity × 1000']
+          ])
+        ),
+      ];
+
+      if (en.rapl_j != null) {
+        cards.push(
+          el('div', { class: 'panel energy-card' },
+            el('div', { class: 'energy-card-header' },
+              el('b', { text: 'Measured energy (RAPL)' }),
+              el('span', { class: 'chip ok' }, 'Hardware counter')
+            ),
+            el('div', { class: 'metric-val' }, en.rapl_j.toFixed(4) + ' J'),
+            el('div', { class: 'energy-card-sub muted', text: 'Direct /sys/class/powercap reading' })
+          )
+        );
+      }
+
+      parts.push(el('div', { class: 'energy-grid' }, cards));
+
+      if (en.rapl_j == null) {
+        parts.push(el('div', { class: 'energy-rapl-quiet', text: 'Hardware energy counters are not available on this computer' }));
+      }
+    }
+
+    // SVG Bar Chart of last 20 runs
+    const history = getEnergyHistory();
+    parts.push(renderEnergyChart(history, () => {
+      clearEnergyHistory();
+      renderResults();
+    }));
+
+    // Optimization Comparison (-O0 vs -O2, hidden for Python and Java)
+    if (s.language === 'cpp' || s.language === 'c') {
+      parts.push(renderCompareSection());
+    }
+
+    return el('div', { class: 'stack-sm' }, parts);
+  }
+
   /* ── actions ── */
   async function runJob(kind) {
     const code = ed.get();
@@ -450,9 +807,23 @@ function pageWorkspace(root) {
           const d = await call('/api/cpp/run', { code, stdin: s.stdin, language: s.language });
           s.result = d.analysis || d;
           s.run = d.run || (d.ran ? d : null);
+          s.energy = d.energy || (d.run && d.run.energy) || null;
+          if (s.energy && s.energy.est_energy_j != null) {
+            pushEnergyHistory({
+              time: Date.now(),
+              label: (s.language || 'cpp').toUpperCase() + ' ' + (new Date()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+              lang: s.language || 'cpp',
+              energy_j: s.energy.est_energy_j,
+              cpu_s: s.energy.cpu_s,
+              wall_s: s.energy.wall_s,
+              peak_mem_mb: s.energy.peak_mem_mb,
+              co2_mg: s.energy.est_co2_mg
+            });
+          }
         } else {
           s.result = await call('/api/cpp/analyze', { code, language: s.language });
           s.run = null;
+          s.energy = null;
         }
         if (!s.result) s.result = { ok: false, error_count: 0, warning_count: 0, diagnostics: [] };
         s.lastCheckedCode = code; markEditor(s.result);
