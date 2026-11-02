@@ -225,51 +225,51 @@ $$\text{Risk Score} = \min(100.0, \max(0.0, \text{Raw Score}))$$
 
 ### 5.4 Empirical Defense Metrics (Copied Directly from `results/aai_metrics.json`)
 
-Evaluated on the **frozen test split** ($N = 352$, containing 176 attacks and 176 benign programs). Every figure below is copied directly from `results/aai_metrics.json`:
+Evaluated on the **frozen test split** ($N = 308$, containing 154 attacks and 154 benign programs, strictly isolated by template family with verified 60-character prefix disjointness). Every figure below is copied directly from `results/aai_metrics.json`:
 
-#### 1. Confusion Matrix ($N = 352$)
-- **True Positives (TP):** 87 (Attacks quarantined)
-- **False Positives (FP):** 5 (Benign flagged)
-- **True Negatives (TN):** 88 (Benign permitted)
-- **False Negatives (FN):** 6 (Attacks missed)
+#### 1. Confusion Matrix ($N = 308$)
+- **True Positives (TP):** 100 (Attacks quarantined)
+- **False Positives (FP):** 9 (Benign flagged)
+- **True Negatives (TN):** 145 (Benign permitted)
+- **False Negatives (FN):** 54 (Attacks missed)
 
 #### 2. Key Statistical Metrics & 95% Wilson Confidence Intervals
 | Metric | Value | 95% Wilson Confidence Interval |
 |:---|:---:|:---:|
-| **Accuracy** | **94.09% (0.9409)** | [89.72%, 96.67%] |
-| **Precision** | **94.57% (0.9457)** | [87.90%, 97.66%] |
-| **Recall (Detection Rate)** | **93.55% (0.9355)** | [86.63%, 97.01%] |
-| **F1 Score** | **0.9405** | — |
-| **Matthews Correlation (MCC)** | **0.8818** | — |
-| **False Positive Rate (FPR)** | **5.38% (0.0538)** | [2.32%, 11.97%] |
-| **False Negative Rate (FNR)** | **6.45% (0.0645)** | — |
-| **Attack Success Rate (ASR)** | **6.45% (0.0645)** | [2.99%, 13.37%] |
-| **ROC-AUC** | **0.9749** | — |
-| **PR-AUC** | **0.9830** | — |
-| **Latency (p50 / p95 / max)** | **10.656 ms / 55.823 ms / 72.504 ms** (avg 23.182 ms) | — |
+| **Accuracy** | **79.55% (0.7955)** | [74.69%, 83.67%] |
+| **Precision** | **91.74% (0.9174)** | [85.05%, 95.60%] |
+| **Recall (Detection Rate)** | **64.94% (0.6494)** | [57.12%, 72.02%] |
+| **F1 Score** | **0.7605** | — |
+| **Matthews Correlation (MCC)** | **0.6179** | — |
+| **False Positive Rate (FPR)** | **5.84% (0.0584)** | [3.10%, 10.73%] |
+| **False Negative Rate (FNR)** | **35.06% (0.3506)** | — |
+| **Attack Success Rate (ASR)** | **35.06% (0.3506)** | [27.98%, 42.88%] |
+| **ROC-AUC** | **0.8707** | — |
+| **PR-AUC** | **0.9064** | — |
+| **Latency (p50 / p95 / max)** | **3.734 ms / 59.041 ms / 87.444 ms** (avg 19.574 ms) | — |
 
 #### 3. Six-Stage Layer Ablation Progression
 | Ablation Stage | TP | FP | TN | FN | Accuracy | Precision | Recall | F1 Score | FPR | ASR |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **(0) No Guardrail** | 0 | 0 | 93 | 93 | 50.00% | 0.00% | 0.00% | 0.0000 | 0.00% | 100.00% |
-| **(1) Regex Only (Old)** | 34 | 0 | 93 | 59 | 68.28% | 100.00% | 36.56% | 0.5354 | 0.00% | 63.44% |
-| **(2) + Normalization** | 46 | 0 | 93 | 47 | 74.73% | 100.00% | 49.46% | 0.6619 | 0.00% | 50.54% |
-| **(3) + Code Layer** | 46 | 0 | 93 | 47 | 74.73% | 100.00% | 49.46% | 0.6619 | 0.00% | 50.54% |
-| **(4) + ML Classifier** | 87 | 0 | 93 | 6 | 96.77% | 100.00% | 93.55% | 0.9667 | 0.00% | 6.45% |
-| **(5) Full Guardrail** | **87** | **5** | **88** | **6** | **94.09%** | **94.57%** | **93.55%** | **0.9405** | **5.38%** | **6.45%** |
+| **(0) No Guardrail** | 0 | 0 | 154 | 154 | 50.00% | 0.00% | 0.00% | 0.0000 | 0.00% | 100.00% |
+| **(1) Regex Only (Old)** | 37 | 0 | 154 | 117 | 62.01% | 100.00% | 24.03% | 0.3874 | 0.00% | 75.97% |
+| **(2) + Normalization** | 61 | 0 | 154 | 93 | 69.81% | 100.00% | 39.61% | 0.5674 | 0.00% | 60.39% |
+| **(3) + Code Layer** | 61 | 0 | 154 | 93 | 69.81% | 100.00% | 39.61% | 0.5674 | 0.00% | 60.39% |
+| **(4) + ML Classifier** | 102 | 8 | 146 | 52 | 80.52% | 92.73% | 66.23% | 0.7727 | 5.19% | 33.77% |
+| **(5) Full Guardrail** | **100** | **9** | **145** | **54** | **79.55%** | **91.74%** | **64.94%** | **0.7605** | **5.84%** | **35.06%** |
 
 #### 4. Detection Recall by Attack Class & Obfuscation
-- **Recall by Class (A–K):** Class A: 100.0% (1.0), Class B: 100.0% (1.0), Class C: 100.0% (1.0), Class D: 88.89% (0.8889), Class E: 100.0% (1.0), Class F: 100.0% (1.0), Class G: 87.50% (0.8750), Class H: 100.0% (1.0), Class I: 100.0% (1.0), Class J: 70.0% (0.70), Class K: 90.0% (0.90).
-- **Recall by Obfuscation:** Base64: 100.0%, Homoglyphs: 100.0%, Leet: 100.0%, Multilingual: 100.0%, Split: 100.0%, None: 89.74%, Zero-Width: 100.0%, Long Context: 81.82%.
-- **End-to-End Evil LLM Simulation:** 38 adversarial patches/tool calls tested; 36 blocked/discarded (**94.7% mitigation rate**), 2 slipped unmitigated. Clean program healing success rate: 50.0% with guardrail ON vs 50.0% with guardrail OFF (0.0% degradation).
+- **Recall by Class (A–K, 14 samples each):** Class A: 78.6%, Class B: 64.3%, Class C: 57.1%, Class D: 78.6%, Class E: 78.6%, Class F: 50.0%, Class G: 78.6%, Class H: 71.4%, Class I: 35.7%, Class J: 57.1%, Class K: 64.3%.
+- **Recall by Obfuscation:** Base64 (21 samples): 23.8%, Homoglyphs (22 samples): 77.3%, Leet (20 samples): 45.0%, Long Context (12 samples): 33.3%, Multilingual (17 samples): 100.0%, None (34 samples): 64.7%, Split (18 samples): 94.4%, Zero-Width (10 samples): 90.0%.
+- **End-to-End Evil LLM Simulation:** 70 adversarial patches across Classes E, G, H, I, J tested in the live `CompilerAgent().heal()` ReAct loop; 37 blocked/discarded (**52.9% mitigation rate**), 33 slipped unmitigated. Clean program healing success rate: 50.0% with guardrail ON vs 50.0% with guardrail OFF (0.0% degradation).
 
 ---
 
 ### 5.5 Known Limitations & Security Realities
 
 1. **Adaptive Attacker Evasion:** Deterministic regexes and TF-IDF classifiers can be bypassed by an adaptive attacker using novel semantic framing, high-entropy encodings, or multi-turn narrative deception outside the seed vocabulary.
-2. **Corpus Scale & Domain Specificity:** The corpus comprises 400 labeled samples (214 dev / 186 test). Production-grade systems require continuous feedback loops over thousands of in-the-wild interactions.
-3. **No LLM Judge:** The guardrail uses local regex, tokenizers, and lightweight Scikit-Learn models to achieve sub-10ms latency without external network dependencies or recurring API token costs. However, it lacks the deep contextual reasoning of an auxiliary LLM judge, which contributes to lower recall on nuanced prompt leakage attacks (Class J: 70.0%).
+2. **Corpus Scale & Domain Specificity:** The corpus comprises 616 labeled samples (308 dev / 308 test, split by template family with verified 60-character normalized prefix disjointness, including 50 hand-written samples). Production-grade systems require continuous feedback loops over thousands of in-the-wild interactions.
+3. **No LLM Judge:** The guardrail uses local regex, tokenizers, and lightweight Scikit-Learn models to achieve sub-10ms latency (p50: 3.734 ms) without external network dependencies or recurring API token costs. However, it lacks the deep contextual reasoning of an auxiliary LLM judge, which contributes to lower recall on nuanced prompt leakage attacks (Class J: 57.1%) and subtle resource exhaustion (Class I: 35.7%).
 
 ---
 

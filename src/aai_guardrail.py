@@ -458,7 +458,9 @@ class RuleMatcher:
          "Direct Prompt Injection (Faculty Baseline)", "CRITICAL"),
 
         # General Policy Bypass & Tool Suppression
-        (r"(?i)(?:ignore|disregard|override|disable|bypass|skip)\s+(?:all\s+)?(?:the\s+)?(?:security|safety|policy|policies|rules|instructions|vulnerabilities|flaws|warnings|sandbox|(?:validation|safety)\s+(?:step|check|pipeline|rule|process|layer))",
+        (r"(?i)(?:respond|reply|output|say|return|write)\s+(?:only\s+|exclusively\s+)?(?:with\s+)?(?:the\s+word\s+)?[\"']?(?:safe|clean|valid|verified|ok)[\"']?\s+regardless\s+of",
+         "Forced Output / Safety Verdict Override", "CRITICAL"),
+        (r"(?i)(?:ignore|disregard|override|disable|bypass|skip)\s+(?:all\s+)?(?:the\s+)?(?:security|safety|policy|policies|rules|instructions|vulnerabilities|flaws|sandbox|(?:validation|safety)\s+(?:step|check|pipeline|rule|process|layer)|(?:security|safety|validation)\s+warnings|warnings(?!\s+(?:about\s+)?(?:unused|deprecated|compiler|variable|parameter|cast|sign|conversion|type|alignment|fallthrough|switch|formatting|linter|code\s+style)))",
          "Policy Bypass / Rule Override", "CRITICAL"),
         (r"(?i)mark\s+(?:the\s+)?(?:vulnerable|malicious|insecure|bad)\s+code\s+as\s+(?:safe|clean|valid|secure|verified)",
          "Policy Bypass / Integrity Tampering", "CRITICAL"),
@@ -529,9 +531,13 @@ class RuleMatcher:
 
     # Personal Data Access & Credential Harvesting Rules (Ingress & Egress)
     PERSONAL_DATA_RULES: List[Tuple[str, str, str]] = [
-        # SSH Keys
+        # SSH Keys & Shell History
         (r"(?:~[/\\]\.ssh|id_rsa|id_ed25519|authorized_keys|known_hosts)",
          "SSH Key Exfiltration Attempt", "CRITICAL"),
+        (r"(?:~[/\\]\.(?:bash_history|zsh_history|history|bashrc|profile|zshrc)|\.(?:bash_history|zsh_history))",
+         "Shell History & Profile Access Attempt", "CRITICAL"),
+        (r"(?:Path\.home\(\)\s*/\s*[\"'](?:Documents|Desktop|Downloads|Pictures|Videos|Music)|~[/\\](?:Documents|Desktop|Downloads)|os\.path\.expanduser\([\"']~[/\\](?:Documents|Desktop|Downloads)[\"']\))",
+         "User Personal Directory Access", "HIGH"),
 
         # Browser Profile & Cookie Access
         (r"(?:Google[/\\]+Chrome[/\\]+User\s+Data|google-chrome|Mozilla[/\\]+Firefox[/\\]+Profiles|Microsoft[/\\]+Edge[/\\]+User\s+Data|Cookies(?:\.sqlite)?|Login\s+Data|Web\s+Data)",
@@ -572,9 +578,11 @@ class RuleMatcher:
         (r"(?i)(?:system|popen|_popen|ShellExecute|CreateProcess|Runtime\.getRuntime\(\)\.exec|ProcessBuilder)\s*\(?\s*[\"'].*?(?:curl|wget|powershell|cmd\.exe|nc\s+|bash|invoke-webrequest|sh\s+-i|useradd|adduser|chown|chmod|net\s+user|rm\s+-rf|del\s+)",
          "Malicious Outbound Command Injection", "CRITICAL"),
 
-        # Unauthorized Network Sockets
+        # Unauthorized Network Sockets & HTTP Calls
         (r"(?i)(?:connect|WSAStartup|socket)\s*\(",
          "Unauthorized Network Socket Injection", "HIGH"),
+        (r"(?i)\b(?:requests\.(?:post|get|put|delete|patch)|urllib\.request\.urlopen|http\.client\.(?:HTTP|HTTPS)Connection|aiohttp\.ClientSession)\b",
+         "Outbound Network HTTP Call", "HIGH"),
 
         # Fork & Thread Bombs
         (r"(?i)(?:\bwhile\s*\(\s*(?:1|true)\s*\)\s*\{?\s*(?:fork\s*\(|new\s+Thread|ThreadBomb)|\bfork\s*\(\s*\)\s*;\s*return|\bThreadBomb\b)",

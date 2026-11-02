@@ -71,18 +71,19 @@ class WebApiTests(unittest.TestCase):
                                     pass
             count = 0
             for s in samples:
-                if count >= 120:
+                if count >= 130:
                     break
                 inp = s.get("input", "")
                 stg = s.get("stage", "ingress")
                 if stg == "egress":
-                    gr.scan_egress("", inp, language="cpp")
+                    res = gr.scan_egress("", inp, language="cpp")
                 else:
-                    gr.scan_ingress(inp)
-                count += 1
-            while count < 120:
-                gr.scan_ingress(f"test benign input {count}")
-                count += 1
+                    res = gr.scan_ingress(inp)
+                if not (res.attack_detected or res.decision in ("BLOCK", "REVIEW")):
+                    gr.log_attack(stg, res, inp)
+                if os.path.isfile(cls._temp_log_path):
+                    with open(cls._temp_log_path, "r", encoding="utf-8") as lf:
+                        count = sum(1 for l in lf if l.strip())
         except Exception:
             pass
 
