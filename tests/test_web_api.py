@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -43,6 +44,48 @@ class WebApiTests(unittest.TestCase):
         cls._saved = {k: os.environ.pop(k, None) for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "LLM_MOCK")}
         cls._orig_key = server._api_key
         server._api_key = lambda: None
+
+        # Point AAI guardrail audit log to a temporary directory with ~120 generated records
+        # so tests run isolated without depending on logs/aai_audit.jsonl existing.
+        cls._temp_dir = tempfile.TemporaryDirectory()
+        cls._temp_log_path = os.path.join(cls._temp_dir.name, "aai_audit.jsonl")
+        cls._orig_log_path = os.environ.get("AAI_AUDIT_LOG_PATH")
+        os.environ["AAI_AUDIT_LOG_PATH"] = cls._temp_log_path
+        server.set_audit_log_path(cls._temp_log_path)
+
+        try:
+            from aai_guardrail import AAIGuardrail
+            gr = AAIGuardrail(audit_log_path=cls._temp_log_path)
+            samples = []
+            attacks_file = os.path.join(os.path.dirname(__file__), "..", "data", "aai", "attacks.jsonl")
+            benign_file = os.path.join(os.path.dirname(__file__), "..", "data", "aai", "benign.jsonl")
+            for fpath in (attacks_file, benign_file):
+                if os.path.isfile(fpath):
+                    with open(fpath, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                try:
+                                    samples.append(json.loads(line))
+                                except Exception:
+                                    pass
+            count = 0
+            for s in samples:
+                if count >= 120:
+                    break
+                inp = s.get("input", "")
+                stg = s.get("stage", "ingress")
+                if stg == "egress":
+                    gr.scan_egress("", inp, language="cpp")
+                else:
+                    gr.scan_ingress(inp)
+                count += 1
+            while count < 120:
+                gr.scan_ingress(f"test benign input {count}")
+                count += 1
+        except Exception:
+            pass
+
         cls.srv = server.make_server("127.0.0.1", 0)
         cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
         cls.thread = threading.Thread(target=cls.srv.serve_forever, daemon=True)
@@ -56,6 +99,17 @@ class WebApiTests(unittest.TestCase):
         for k, v in cls._saved.items():
             if v is not None:
                 os.environ[k] = v
+
+        if cls._orig_log_path is None:
+            os.environ.pop("AAI_AUDIT_LOG_PATH", None)
+            server.set_audit_log_path(None)
+        else:
+            os.environ["AAI_AUDIT_LOG_PATH"] = cls._orig_log_path
+            server.set_audit_log_path(cls._orig_log_path)
+        try:
+            cls._temp_dir.cleanup()
+        except Exception:
+            pass
 
     # -- helpers -------------------------------------------------------------
     def get(self, path):

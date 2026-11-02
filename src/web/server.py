@@ -721,6 +721,26 @@ def api_benchmark() -> Dict[str, Any]:
 # AAI Security Endpoints (Attack Lab, Audit Log, Metrics)
 # ──────────────────────────────────────────────────────────────────────────────
 
+AUDIT_LOG_PATH = ROOT_DIR / "logs" / "aai_audit.jsonl"
+
+
+def get_audit_log_path() -> Path:
+    env_path = os.environ.get("AAI_AUDIT_LOG_PATH")
+    if env_path:
+        return Path(env_path)
+    return AUDIT_LOG_PATH
+
+
+def set_audit_log_path(path: Optional[Any]) -> None:
+    global AUDIT_LOG_PATH, _guardrail_instance
+    if path is None:
+        AUDIT_LOG_PATH = ROOT_DIR / "logs" / "aai_audit.jsonl"
+    else:
+        AUDIT_LOG_PATH = Path(path)
+    with _guardrail_lock:
+        _guardrail_instance = None
+
+
 _guardrail_lock = threading.Lock()
 _guardrail_instance = None
 
@@ -729,7 +749,7 @@ def _get_guardrail():
     global _guardrail_instance
     with _guardrail_lock:
         if _guardrail_instance is None and AAIGuardrail is not None:
-            _guardrail_instance = AAIGuardrail(audit_log_path=str(ROOT_DIR / "logs" / "aai_audit.jsonl"))
+            _guardrail_instance = AAIGuardrail(audit_log_path=str(get_audit_log_path()))
         return _guardrail_instance
 
 
@@ -820,7 +840,7 @@ def api_aai_samples() -> Dict[str, Any]:
 
 
 def api_aai_log(limit: int = 500) -> Dict[str, Any]:
-    log_file = ROOT_DIR / "logs" / "aai_audit.jsonl"
+    log_file = get_audit_log_path()
     if not log_file.is_file():
         return {
             "records": [],
@@ -890,7 +910,7 @@ def api_aai_log(limit: int = 500) -> Dict[str, Any]:
 def api_aai_verify_log() -> Dict[str, Any]:
     if verify_log is None:
         raise ApiError("AAI Guardrail verify_log is not available.", 500)
-    log_path = ROOT_DIR / "logs" / "aai_audit.jsonl"
+    log_path = get_audit_log_path()
     res = verify_log(str(log_path))
     return {
         "ok": True,
@@ -1019,13 +1039,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         fn = POST_ROUTES.get(path)
-        if not fn:
-            return self._send_json({"error": "Unknown endpoint"}, 404)
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
+        if not fn:
+            if 0 < length <= MAX_BODY_BYTES:
+                try:
+                    self.rfile.read(length)
+                except Exception:
+                    pass
+            return self._send_json({"error": "Unknown endpoint"}, 404)
         if length <= 0 or length > MAX_BODY_BYTES:
+            if length > MAX_BODY_BYTES:
+                try:
+                    self.rfile.read(min(length, 4096))
+                except Exception:
+                    pass
             return self._send_json({"error": "Request body missing or too large."}, 413 if length else 400)
         try:
             body = json.loads(self.rfile.read(length).decode("utf-8"))

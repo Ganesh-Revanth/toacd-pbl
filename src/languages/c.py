@@ -1,7 +1,7 @@
 """
 c.py
 ----
-C language implementation targeting gcc (-std=c11 -Wall) and clang++ AST extractor.
+C language implementation targeting gcc (-std=c11 -Wall -Werror=implicit-function-declaration) and clang++ AST extractor.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def _find_gcc() -> Tuple[str, Dict[str, str]]:
 
 
 class CLanguage(Language):
-    """C language implementation targeting gcc (-std=c11 -Wall)."""
+    """C language implementation targeting gcc (-std=c11 -Wall -Werror=implicit-function-declaration)."""
 
     id = "c"
     name = "C"
@@ -99,7 +99,7 @@ class CLanguage(Language):
             return bool(shutil.which("gcc"))
 
     def check(self, code: str, workdir: str) -> List[Dict[str, Any]]:
-        """Compile code with gcc -std=c11 -Wall inside workdir. Returns list of diagnostics."""
+        """Compile code with gcc -std=c11 -Wall -Werror=implicit-function-declaration inside workdir. Returns list of diagnostics."""
         src = os.path.join(workdir, "main.c")
         with open(src, "w", encoding="utf-8") as f:
             f.write(code)
@@ -119,7 +119,7 @@ class CLanguage(Language):
         out_path = os.path.join(workdir, OUT_NAME)
         try:
             res = subprocess.run(
-                [gcc, "-std=c11", "-Wall", src, "-o", out_path],
+                [gcc, "-std=c11", "-Wall", "-Werror=implicit-function-declaration", src, "-o", out_path],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 encoding="utf-8", errors="replace", env=env,
                 cwd=workdir, timeout=COMPILE_TIMEOUT_S,
