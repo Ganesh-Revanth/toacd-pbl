@@ -35,7 +35,7 @@ import shutil
 import sys
 import subprocess
 import re
-from typing import Optional
+from typing import Optional, Any
 
 try:
     from PyQt6.QtCore import QThread, pyqtSignal
@@ -280,6 +280,78 @@ def _pick_fix_target(issues: list[dict], skipped_keys: Optional[set] = None) -> 
     return None
 
 
+def _pick_independent_fix_targets(issues: list[dict], skipped_keys: Optional[set] = None) -> list[dict]:
+    """
+    Select all independent fix targets in one round.
+    Two diagnostics are independent if they occur on different lines.
+    Only one diagnostic per line is selected.
+    Missing include / header additions are grouped safely.
+    """
+    if skipped_keys is None:
+        skipped_keys = set()
+    targets = []
+    seen_lines = set()
+    has_header_fix = False
+
+    for issue_type in ("error", "warning"):
+        for issue in issues:
+            if issue.get("type") != issue_type:
+                continue
+            if issue.get("category") in UNFIXABLE_CATEGORIES:
+                continue
+            key = (issue.get("file"), issue.get("line"), issue.get("message"))
+            if key in skipped_keys:
+                continue
+
+            line = issue.get("line")
+            category = issue.get("category")
+
+            if category == "missing_include":
+                if not has_header_fix:
+                    targets.append(issue)
+                    has_header_fix = True
+            elif line is not None and line > 0:
+                if line not in seen_lines:
+                    seen_lines.add(line)
+                    targets.append(issue)
+            elif not targets:
+                targets.append(issue)
+
+    return targets
+
+
+def apply_independent_fixes(source: str, targets: list[dict], skipped_keys: Optional[set] = None, fix_fn: Any = None) -> tuple[str, list[dict]]:
+    """
+    Apply a batch of independent fixes to source.
+    Line-based fixes are applied in descending order of line number (bottom-up)
+    so earlier line positions are unaffected by line additions or deletions.
+    Header additions are applied last.
+    Returns (patched_source, applied_targets).
+    """
+    if skipped_keys is None:
+        skipped_keys = set()
+    if fix_fn is None:
+        fix_fn = attempt_fix
+
+    current = source
+    applied = []
+
+    line_targets = [t for t in targets if t.get("category") != "missing_include" and (t.get("line") or 0) > 0]
+    line_targets.sort(key=lambda t: t.get("line", 0), reverse=True)
+    header_targets = [t for t in targets if t not in line_targets]
+
+    for t in line_targets + header_targets:
+        key = (t.get("file"), t.get("line"), t.get("message"))
+        patched = fix_fn(current, t)
+        if patched is not None and patched != current:
+            current = patched
+            applied.append(t)
+        else:
+            skipped_keys.add(key)
+
+    return current, applied
+
+
 class HealWorker(QThread):
     """
     QThread that runs the full heal loop asynchronously.
@@ -391,6 +463,7 @@ class HealWorker(QThread):
         telemetry = []
         attempted_error_counts = {}
         skipped_keys = set()
+        prev_error_count = float("inf")
 
         if not self.file_path or not os.path.exists(self.file_path):
             self.error_signal.emit(f"Source file not found: {self.file_path}")
@@ -438,14 +511,26 @@ class HealWorker(QThread):
                 self.compile_clean.emit()
                 return telemetry
 
+            hard_errors = [e for e in all_errors if e.get("type") == "error"]
+
+            # Stop early when the error set stops shrinking
+            if attempt > 1 and hard_errors and len(hard_errors) >= prev_error_count:
+                _safe_stop_tracker(attempt_tracker)
+                self._attach_failure_suggestion(history, hard_errors[0], source)
+                self._restore_backup(backup_path)
+                self.give_up.emit(history)
+                return telemetry
+
+            if hard_errors:
+                prev_error_count = len(hard_errors)
+
             # 2. Classify
             _classify_errors(all_errors, self.classifier)
 
-            # 3. Pick target
-            target = _pick_fix_target(all_errors, skipped_keys)
-            if target is None:
+            # 3. Pick independent targets (all diagnostics on different lines in one round)
+            targets = _pick_independent_fix_targets(all_errors, skipped_keys)
+            if not targets:
                 _safe_stop_tracker(attempt_tracker)
-                hard_errors = [e for e in all_errors if e.get("type") == "error"]
                 if not hard_errors:
                     # No hard errors — treat as clean
                     self._delete_backup(backup_path)
@@ -460,29 +545,30 @@ class HealWorker(QThread):
                 self.give_up.emit(history)
                 return telemetry
 
-            self.attempt_started.emit(attempt, target)
+            primary_target = targets[0]
+            self.attempt_started.emit(attempt, primary_target)
 
-            error_key = (target.get("file"), target.get("line"), target.get("message"))
+            error_key = (primary_target.get("file"), primary_target.get("line"), primary_target.get("message"))
             attempt_count = attempted_error_counts.get(error_key, 0)
             if attempt_count >= 2:
-                # ❌ Stuck on the exact same error on the exact same line across rounds — restore original and give up
+                # ❌ Stuck on the exact same error across rounds — restore original and give up
                 _safe_stop_tracker(attempt_tracker)
-                self._attach_failure_suggestion(history, target, source)
+                self._attach_failure_suggestion(history, primary_target, source)
                 self._restore_backup(backup_path)
                 self.give_up.emit(history)
                 return telemetry
             attempted_error_counts[error_key] = attempt_count + 1
 
-            # 4. Patch
-            patched = attempt_fix(source, target)
-            if patched is None or patched == source:
+            # 4. Patch all independent errors in one round
+            patched, applied_targets = apply_independent_fixes(source, targets, skipped_keys)
+            if not applied_targets or patched == source:
                 _safe_stop_tracker(attempt_tracker)
                 history.append({
-                    "attempt": attempt, "error": target, "patch": None, "reason": "no_patch_available"
+                    "attempt": attempt, "error": primary_target, "patch": None, "reason": "no_patch_available"
                 })
                 skipped_keys.add(error_key)
                 if attempt == MAX_ATTEMPTS:
-                    self._attach_failure_suggestion(history, target, source)
+                    self._attach_failure_suggestion(history, primary_target, source)
                     # ❌ Exhausted attempts — restore original and give up
                     self._restore_backup(backup_path)
                     self.give_up.emit(history)
@@ -501,7 +587,7 @@ class HealWorker(QThread):
             self.lines_fixed.emit(fixed_line_nos)
 
             history.append({
-                "attempt": attempt, "error": target, "patch": patched, "diff_html": diff_html
+                "attempt": attempt, "error": primary_target, "targets_fixed": len(applied_targets), "patch": patched, "diff_html": diff_html
             })
 
             # 6. Save patched source (backup still held in case next attempt fails)

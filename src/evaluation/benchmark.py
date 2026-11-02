@@ -46,7 +46,14 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(_SRC_DIR, ".."))
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-from heal_loop import _compile, _pre_scan, _classify_errors, _pick_fix_target
+from heal_loop import (
+    _compile,
+    _pre_scan,
+    _classify_errors,
+    _pick_fix_target,
+    _pick_independent_fix_targets,
+    apply_independent_fixes,
+)
 from auto_healer import attempt_fix
 from error_classifier import ErrorClassifier
 from build_dataset_from_tests import FILE_LABELS
@@ -198,12 +205,12 @@ def run_rule_based_healer(
     source_code: str,
     file_path: str,
     classifier: ErrorClassifier,
-    max_attempts: int = 3,
+    max_attempts: int = 10,
     lang: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run rule-based healer (heal_loop logic + auto_healer heuristics only) up to max_attempts.
-    For C++ and C: runs the deterministic regex/AST rule-based healer.
+    For C++ and C: runs the deterministic regex/AST rule-based healer with multi-error batching.
     For Python and Java: marks applicable=False as these languages use Gemini agent only.
     """
     if not lang:
@@ -249,6 +256,7 @@ def run_rule_based_healer(
         # C++ and C use rule-based healing pass
         skipped_keys = set()
         attempts_used = 0
+        prev_error_count = float("inf")
 
         for attempt in range(1, max_attempts + 1):
             attempts_used = attempt
@@ -273,16 +281,21 @@ def run_rule_based_healer(
                     "applicable": True,
                 }
 
+            # Stop early when the error set stops shrinking
+            if attempt > 1 and len(hard_errors) >= prev_error_count:
+                break
+            prev_error_count = len(hard_errors)
+
             _classify_errors(all_errors, classifier)
-            target = _pick_fix_target(all_errors, skipped_keys)
-            if target is None:
+            targets = _pick_independent_fix_targets(all_errors, skipped_keys)
+            if not targets:
                 break
 
-            error_key = (target.get("file"), target.get("line"), target.get("message"))
-            patched = attempt_fix(current_source, target)
-            if patched is None or patched == current_source:
-                skipped_keys.add(error_key)
-                continue
+            patched, applied = apply_independent_fixes(
+                current_source, targets, skipped_keys, fix_fn=attempt_fix
+            )
+            if not applied or patched == current_source:
+                break
 
             current_source = patched
             skipped_keys.clear()
@@ -321,7 +334,7 @@ def run_rule_based_healer(
 def run_llm_agent(
     source_code: str,
     file_path: str,
-    max_attempts: int = 3,
+    max_attempts: int = 12,
     client: Optional[LLMClient] = None,
     lang: Optional[str] = None,
 ) -> Dict[str, Any]:

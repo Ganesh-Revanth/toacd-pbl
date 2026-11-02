@@ -67,7 +67,7 @@ except Exception:
 
 MAX_BODY_BYTES = 1_000_000
 COMPILE_TIMEOUT_S = 30
-HEAL_ATTEMPTS = 3
+HEAL_ATTEMPTS = 10
 RUN_TIMEOUT_S = 5            # a program that runs longer than this is stopped
 RUN_OUTPUT_CAP = 64 * 1024   # bytes of stdout/stderr kept; more than this stops the program
 RUN_STDIN_CAP = 64 * 1024
@@ -386,6 +386,33 @@ def _pick_fix_target(issues, skipped):
     return None
 
 
+def _pick_independent_fix_targets(issues, skipped):
+    from auto_healer import UNFIXABLE_CATEGORIES
+    targets = []
+    seen_lines = set()
+    has_header = False
+    for kind in ("error", "warning"):
+        for it in issues:
+            if it.get("type") != kind or it.get("category") in UNFIXABLE_CATEGORIES:
+                continue
+            key = (it.get("line"), it.get("message"))
+            if key in skipped:
+                continue
+            line = it.get("line")
+            cat = it.get("category")
+            if cat == "missing_include":
+                if not has_header:
+                    targets.append(it)
+                    has_header = True
+            elif line is not None and line > 0:
+                if line not in seen_lines:
+                    seen_lines.add(line)
+                    targets.append(it)
+            elif not targets:
+                targets.append(it)
+    return targets
+
+
 def api_cpp_heal(body: Dict[str, Any]) -> Dict[str, Any]:
     """Rule-based or AI healing. Returns a PROPOSAL (original, patched, diff, steps)."""
     code = _need_code(body)
@@ -403,6 +430,8 @@ def api_cpp_heal(body: Dict[str, Any]) -> Dict[str, Any]:
     current = code
     skipped: set = set()
     ext = lang.extensions[0] if lang.extensions else ".cpp"
+    prev_error_count = float("inf")
+
     with tempfile.TemporaryDirectory(prefix="webui_") as wd:
         for attempt in range(1, HEAL_ATTEMPTS + 1):
             try:
@@ -411,34 +440,58 @@ def api_cpp_heal(body: Dict[str, Any]) -> Dict[str, Any]:
                 raise ApiError(str(e), 503)
             except FileNotFoundError:
                 raise ApiError(f"{lang.name} compiler was not found on this machine.", 503)
-            _classify(errors)
-            target = _pick_fix_target(errors, skipped)
-            if target is None:
+
+            hard_errors = [e for e in errors if e.get("type") == "error"]
+            if not hard_errors:
                 break
-            if lang.id == "python":
-                from languages.python_rules import attempt_fix_python
-                patched = attempt_fix_python(current, target)
-            elif lang.id == "java":
-                from languages.java_rules import attempt_fix_java
-                patched = attempt_fix_java(current, target)
-            else:
-                patched = attempt_fix(current, target)
-            if not patched or patched == current:
-                skipped.add((target.get("line"), target.get("message")))
+
+            # Stop early when the error set stops shrinking
+            if attempt > 1 and len(hard_errors) >= prev_error_count:
+                break
+            prev_error_count = len(hard_errors)
+
+            _classify(errors)
+            targets = _pick_independent_fix_targets(errors, skipped)
+            if not targets:
+                break
+
+            line_targets = [t for t in targets if t.get("category") != "missing_include" and (t.get("line") or 0) > 0]
+            line_targets.sort(key=lambda t: t.get("line", 0), reverse=True)
+            other_targets = [t for t in targets if t not in line_targets]
+
+            applied_any = False
+            for target in line_targets + other_targets:
+                if lang.id == "python":
+                    from languages.python_rules import attempt_fix_python
+                    patched = attempt_fix_python(current, target)
+                elif lang.id == "java":
+                    from languages.java_rules import attempt_fix_java
+                    patched = attempt_fix_java(current, target)
+                else:
+                    patched = attempt_fix(current, target)
+
+                if not patched or patched == current:
+                    skipped.add((target.get("line"), target.get("message")))
+                    steps.append({
+                        "attempt": attempt, "fixed": False,
+                        "line": target.get("line"), "message": target.get("message"),
+                        "category": target.get("category"),
+                        "note": "No automatic rule could fix this diagnostic.",
+                    })
+                    continue
+
+                applied_any = True
                 steps.append({
-                    "attempt": attempt, "fixed": False,
+                    "attempt": attempt, "fixed": True,
                     "line": target.get("line"), "message": target.get("message"),
                     "category": target.get("category"),
-                    "note": "No automatic rule could fix this diagnostic.",
+                    "diff": diff_lines(current, patched, 1),
                 })
-                continue
-            steps.append({
-                "attempt": attempt, "fixed": True,
-                "line": target.get("line"), "message": target.get("message"),
-                "category": target.get("category"),
-                "diff": diff_lines(current, patched, 1),
-            })
-            current = patched
+                current = patched
+
+            if not applied_any:
+                break
+
         final_errors = lang.check(current, wd)
         _classify(final_errors)
         src = os.path.join(wd, f"main{ext}")

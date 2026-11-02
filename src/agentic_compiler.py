@@ -93,7 +93,7 @@ class CompilerAgent:
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
-        max_iterations: int = 6,
+        max_iterations: int = 12,
         client: Optional[LLMClient] = None,
         language: Any = "cpp",
         enable_guardrails: bool = True,

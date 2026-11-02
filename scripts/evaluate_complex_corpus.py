@@ -52,7 +52,7 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 from aai_guardrail import AAIGuardrail, GuardrailResult
 from languages import get_language, Language
 from auto_healer import attempt_fix
-from heal_loop import _classify_errors, _pick_fix_target
+from heal_loop import _classify_errors, _pick_fix_target, _pick_independent_fix_targets, apply_independent_fixes
 from error_classifier import ErrorClassifier
 from agentic_compiler import CompilerAgent
 from ai.llm_client import LLMClient, load_env_file
@@ -171,7 +171,7 @@ def extract_adversarial_payload(source_code: str, language: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def evaluate_rule_healer(source_code: str, filename: str, language: str, classifier: ErrorClassifier) -> Tuple[bool, int, float]:
-    """Runs rule-based healer for C/C++. Returns (healed, attempts, time_sec)."""
+    """Runs rule-based healer for C/C++ up to 10 attempts with multi-error batching. Returns (healed, attempts, time_sec)."""
     if language not in ("cpp", "c"):
         return False, 0, 0.0
 
@@ -180,25 +180,29 @@ def evaluate_rule_healer(source_code: str, filename: str, language: str, classif
     lang_obj = get_language(language)
     skipped_keys = set()
     attempts_used = 0
+    prev_error_count = float("inf")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        for attempt in range(1, 4):
+        for attempt in range(1, 11):
             attempts_used = attempt
             diags = lang_obj.check(current_source, tmp_dir)
             hard_errors = [e for e in diags if e.get("type") == "error"]
             if not hard_errors:
                 return True, attempts_used, round(time.perf_counter() - start_time, 3)
 
+            # Stop early when the error set stops shrinking
+            if attempt > 1 and len(hard_errors) >= prev_error_count:
+                break
+            prev_error_count = len(hard_errors)
+
             _classify_errors(diags, classifier)
-            target = _pick_fix_target(diags, skipped_keys)
-            if target is None:
+            targets = _pick_independent_fix_targets(diags, skipped_keys)
+            if not targets:
                 break
 
-            error_key = (target.get("file"), target.get("line"), target.get("message"))
-            patched = attempt_fix(current_source, target)
-            if patched is None or patched == current_source:
-                skipped_keys.add(error_key)
-                continue
+            patched, applied = apply_independent_fixes(current_source, targets, skipped_keys)
+            if not applied or patched == current_source:
+                break
 
             current_source = patched
             skipped_keys.clear()
@@ -215,14 +219,14 @@ def evaluate_rule_healer(source_code: str, filename: str, language: str, classif
 # ──────────────────────────────────────────────────────────────────────────────
 
 def evaluate_agent_healer(source_code: str, filename: str, language: str, client: LLMClient) -> Tuple[bool, int, float]:
-    """Runs autonomous Gemini compiler agent up to 3 iterations."""
+    """Runs autonomous Gemini compiler agent up to 12 iterations."""
     start_time = time.perf_counter()
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_file = os.path.join(tmp_dir, filename)
         with open(tmp_file, "w", encoding="utf-8") as f:
             f.write(source_code)
 
-        agent = CompilerAgent(max_iterations=3, client=client, language=language, enable_guardrails=True)
+        agent = CompilerAgent(max_iterations=12, client=client, language=language, enable_guardrails=True)
         try:
             result = agent.heal(source_code, tmp_file)
             healed = bool(result.get("success", False))
@@ -243,7 +247,7 @@ def run_evaluation() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
 
     fixtures = discover_complex_corpus()
     print(f"[*] Discovered {len(fixtures)} fixtures across C++, C, Python, and Java.")
-    assert len(fixtures) == 110, f"Expected exactly 110 fixtures, found {len(fixtures)}!"
+    assert len(fixtures) in (110, 134), f"Expected 110 or 134 fixtures, found {len(fixtures)}!"
 
     guard = AAIGuardrail(enable_ml=True)
     classifier = ErrorClassifier()
@@ -368,7 +372,7 @@ def run_evaluation() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
             "is_false_positive_strict": is_fp_strict,
             "is_false_positive_review": is_fp_review,
             "attack_intercepted": attack_intercepted,
-            "rule_healing_status": ("SUCCESS" if rule_healed else "FAILED") if lang in ("cpp", "c") else "N/A",
+            "rule_healing_status": ("SUCCESS" if rule_healed else "FAILED") if (suite == "broken" and lang in ("cpp", "c")) else "N/A",
             "agent_healing_status": ("SUCCESS" if agent_healed else "FAILED") if suite == "broken" else "N/A",
             "overall_healed": ("SUCCESS" if overall_healed else "FAILED") if suite == "broken" else "N/A",
             "guardrail_latency_ms": round(elapsed_ms, 2),
@@ -478,7 +482,7 @@ def export_markdown(results: List[Dict[str, Any]], summary: Dict[str, Any], out_
 
     md: List[str] = []
     md.append("# Complex Multi-Language Benchmark & Defense Report")
-    md.append(f"*Generated on: {ts}* | *Corpus: `test_cases/complex/` (110 programs, 150-500 LOC each)*\n")
+    md.append(f"*Generated on: {ts}* | *Corpus: `test_cases/complex/` ({len(results)} programs, 150-500 LOC each)*\n")
 
     md.append("## 1. Architectural System Overview")
     md.append(
@@ -500,15 +504,15 @@ def export_markdown(results: List[Dict[str, Any]], summary: Dict[str, Any], out_
     md.append("## 2. Executive Benchmark Metrics Summary")
     md.append("| Metric Dimension | Total Samples | Passed / Success | Rate (%) | Description |")
     md.append("|:---|:---:|:---:|:---:|:---|")
-    md.append(f"| **Benign Compilation Integrity** | {summary['total_benign']} | {summary['benign_compile_pass']} | **{summary['benign_compile_rate']:.1%}** | Clean complex programs compiling cleanly (0 errors) |")
-    md.append(f"| **Guardrail False Positive Rate (Strict BLOCK)** | {summary['total_benign']} | {summary['fp_strict_count']} | **{summary['fpr_strict']:.1%}** | Benign programs blocked erroneously (target: 0.0%) |")
-    md.append(f"| **Guardrail False Positive Rate (REVIEW Mode)** | {summary['total_benign']} | {summary['fp_review_count']} | **{summary['fpr_review']:.1%}** | Benign programs quarantined for review due to sensitive tokens |")
-    md.append(f"| **Adversarial Attack Interception** | {summary['total_malicious']} | {summary['intercepted_count']} | **{summary['recall']:.1%}** | Complex trojans and egress patch attacks quarantined/blocked |")
-    md.append(f"| **Broken Suite Baseline Fault Verification** | {summary['total_broken']} | {summary['broken_baseline_fail']} | **{summary['broken_baseline_fail']/summary['total_broken']:.1%}** | Broken complex programs with 3-5 compiler faults |")
-    md.append(f"| **Rule-Based Healing (C++ & C)** | {summary['cpp_c_broken_count']} | {summary['rule_healed_count']} | **{summary['rule_heal_rate']:.1%}** | Multi-fault C/C++ programs healed purely heuristically |")
-    md.append(f"| **Agentic Gemini Healing (All Broken)** | {summary['total_broken']} | {summary['agent_healed_count']} | **{summary['agent_heal_rate']:.1%}** | Multi-fault programs healed by CompilerAgent |")
-    md.append(f"| **Overall Self-Healing Success Rate** | {summary['total_broken']} | {summary['overall_healed_count']} | **{summary['overall_heal_rate']:.1%}** | Union of Rule-Based and Agentic repairs |")
-    md.append(f"| **Guardrail Latency (p50 / p95 / max)** | 110 files | - | **{summary['latency_p50_ms']}ms / {summary['latency_p95_ms']}ms / {summary['latency_max_ms']}ms** | Multi-layer inspection latency across all 110 fixtures |")
+    md.append(f"| **Benign Compilation Integrity** | {summary['total_benign']} | {summary['benign_compile_pass']} | **{summary['benign_compile_rate']:.1%} ({summary['benign_compile_pass']}/{summary['total_benign']})** | Clean complex programs compiling cleanly (0 errors) |")
+    md.append(f"| **Guardrail False Positive Rate (Strict BLOCK)** | {summary['total_benign']} | {summary['fp_strict_count']} | **{summary['fpr_strict']:.1%} ({summary['fp_strict_count']}/{summary['total_benign']})** | Benign programs blocked erroneously (target: 0.0%) |")
+    md.append(f"| **Guardrail False Positive Rate (REVIEW Mode)** | {summary['total_benign']} | {summary['fp_review_count']} | **{summary['fpr_review']:.1%} ({summary['fp_review_count']}/{summary['total_benign']})** | Benign programs quarantined for review due to sensitive tokens |")
+    md.append(f"| **Adversarial Attack Interception** | {summary['total_malicious']} | {summary['intercepted_count']} | **{summary['recall']:.1%} ({summary['intercepted_count']}/{summary['total_malicious']})** | Complex trojans and egress patch attacks quarantined/blocked |")
+    md.append(f"| **Broken Suite Baseline Fault Verification** | {summary['total_broken']} | {summary['broken_baseline_fail']} | **{summary['broken_baseline_fail']/summary['total_broken']:.1%} ({summary['broken_baseline_fail']}/{summary['total_broken']})** | Broken complex programs with 3-5 compiler faults |")
+    md.append(f"| **Rule-Based Healing (C++ & C)** | {summary['cpp_c_broken_count']} | {summary['rule_healed_count']} | **{summary['rule_heal_rate']:.1%} ({summary['rule_healed_count']}/{summary['cpp_c_broken_count']})** | Multi-fault C/C++ programs healed purely heuristically |")
+    md.append(f"| **Agentic Gemini Healing (All Broken)** | {summary['total_broken']} | {summary['agent_healed_count']} | **{summary['agent_heal_rate']:.1%} ({summary['agent_healed_count']}/{summary['total_broken']})** | Multi-fault programs healed by CompilerAgent |")
+    md.append(f"| **Overall Self-Healing Success Rate** | {summary['total_broken']} | {summary['overall_healed_count']} | **{summary['overall_heal_rate']:.1%} ({summary['overall_healed_count']}/{summary['total_broken']})** | Union of Rule-Based and Agentic repairs |")
+    md.append(f"| **Guardrail Latency (p50 / p95 / max)** | {summary['total_fixtures']} files | - | **{summary['latency_p50_ms']}ms / {summary['latency_p95_ms']}ms / {summary['latency_max_ms']}ms** | Multi-layer inspection latency across all {summary['total_fixtures']} fixtures |")
     md.append("")
 
     # Per-language breakdown
@@ -522,21 +526,24 @@ def export_markdown(results: List[Dict[str, Any]], summary: Dict[str, Any], out_
         l_mal = [r for r in results if r["language"] == lang and r["suite"] == "malicious"]
 
         b_pass = sum(1 for r in l_benign if r["baseline_compile"] == "PASS")
-        b_fpr = sum(1 for r in l_benign if r["is_false_positive_strict"]) / len(l_benign) if l_benign else 0.0
+        b_pass_str = f"{b_pass}/{len(l_benign)} ({b_pass/len(l_benign):.1%})" if l_benign else "0/0 (0.0%)"
+        b_fp_count = sum(1 for r in l_benign if r["is_false_positive_strict"])
+        b_fpr = (b_fp_count / len(l_benign)) if l_benign else 0.0
+        b_fpr_str = f"{b_fpr:.1%} ({b_fp_count}/{len(l_benign)})" if l_benign else "0.0% (0/0)"
 
         r_healed = sum(1 for r in l_broken if r["rule_healing_status"] == "SUCCESS")
         r_str = f"{r_healed}/{len(l_broken)} ({r_healed/len(l_broken):.1%})" if lang in ("cpp", "c") else "N/A (Agent Only)"
 
         a_healed = sum(1 for r in l_broken if r["agent_healing_status"] == "SUCCESS")
-        a_str = f"{a_healed}/{len(l_broken)} ({a_healed/len(l_broken):.1%})" if l_broken else "0/0"
+        a_str = f"{a_healed}/{len(l_broken)} ({a_healed/len(l_broken):.1%})" if l_broken else "0/0 (0.0%)"
 
         m_inter = sum(1 for r in l_mal if r["attack_intercepted"])
-        m_str = f"{m_inter}/{len(l_mal)} ({m_inter/len(l_mal):.1%})" if l_mal else "0/0"
+        m_str = f"{m_inter}/{len(l_mal)} ({m_inter/len(l_mal):.1%})" if l_mal else "0/0 (0.0%)"
 
-        md.append(f"| **{lang.upper()}** | {len(l_benign)} | {b_pass}/{len(l_benign)} (100%) | {b_fpr:.1%} | {len(l_broken)} | {r_str} | {a_str} | {len(l_mal)} | {m_str} |")
+        md.append(f"| **{lang.upper()}** | {len(l_benign)} | {b_pass_str} | {b_fpr_str} | {len(l_broken)} | {r_str} | {a_str} | {len(l_mal)} | {m_str} |")
     md.append("")
 
-    md.append("## 4. Complete Per-File Benchmark Evaluation (110 Fixtures)")
+    md.append(f"## 4. Complete Per-File Benchmark Evaluation ({len(results)} Fixtures)")
     md.append("| # | Filename | Lang | Suite | Lines | Baseline | Ingress Risk | Egress Risk | Decision | FP? | Intercepted? | Rule Heal | Agent Heal | Latency |")
     md.append("|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
 
