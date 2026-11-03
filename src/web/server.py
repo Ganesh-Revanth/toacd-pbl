@@ -579,6 +579,21 @@ def api_cpp_ast(body: Dict[str, Any]) -> Dict[str, Any]:
     return {"tree": scrubbed, "node_count": _count_nodes(scrubbed)}
 
 
+def api_cfg(body: Dict[str, Any]) -> Dict[str, Any]:
+    code = _need_code(body)
+    lang_name = body.get("language") or body.get("lang") or "cpp"
+    func = body.get("function")
+    try:
+        from cfg_extractor import extract_cfg
+        return extract_cfg(code, language=str(lang_name), function=func)
+    except NotSupported as exc:
+        raise ApiError(str(exc), 503)
+    except ValueError as exc:
+        raise ApiError(str(exc), 400)
+    except Exception as exc:
+        raise ApiError(f"CFG extraction failed: {exc}", 500)
+
+
 def _scrub_paths(obj: Any, prefixes: List[str]) -> Any:
     """Remove the temp directory from every string in a JSON-like structure (works for Windows paths too)."""
     if isinstance(obj, str):
@@ -1157,6 +1172,8 @@ POST_ROUTES = {
     "/api/compile": api_cpp_compile,
     "/api/run": api_cpp_run,
     "/api/ast": api_cpp_ast,
+    "/api/cfg": api_cfg,
+    "/api/cpp/cfg": api_cfg,
     "/api/samples": lambda body: api_samples(body.get("language", body.get("lang", "cpp"))),
     "/api/aai/scan": api_aai_scan,
     "/api/aai/verify-log": lambda _b: api_aai_verify_log(),

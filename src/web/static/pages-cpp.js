@@ -254,6 +254,14 @@ function pageWorkspace(root) {
   s.stdin = s.stdin || '';
   s.tab = s.tab || 'output';
   s.energy = s.energy || null;
+  s.cfg = s.cfg || null;
+  s.cfgLoading = false;
+  s.cfgLastError = null;
+  s.cfgSelectedFunc = s.cfgSelectedFunc || null;
+  s.cfgSelectedBlock = s.cfgSelectedBlock || null;
+  s.astData = s.astData || null;
+  s.astLoading = false;
+  s.astError = null;
   if (s.baseline === undefined) s.baseline = s.code;
   const aiOK = state.status.ai_ready;
   let working = null;          // null | 'compile' | 'run' | 'heal'
@@ -381,6 +389,8 @@ function pageWorkspace(root) {
     setFile(s.filename);
     s.baseline = s.code;
     s.result = null; s.run = null; s.energy = null; s.pending = null; s.lastCheckedCode = null;
+    s.cfg = null; s.cfgLastError = null; s.cfgSelectedFunc = null; s.cfgSelectedBlock = null;
+    s.astData = null; s.astError = null;
     cmpResult = null; cmpError = null;
     s.tab = 'output'; flash = null; healNote = null; lastDecisionNote = null;
     ed.mark({}); renderResults(); updateStale(); updateInputHint();
@@ -397,6 +407,8 @@ function pageWorkspace(root) {
         !window.confirm('Replace the code in the editor? Your unsaved changes will be lost.')) return;
     ed.set(text); setFile(name || s.filename); s.baseline = text;
     s.result = null; s.run = null; s.energy = null; s.pending = null; s.lastCheckedCode = null; s.tab = 'output';
+    s.cfg = null; s.cfgLastError = null; s.cfgSelectedFunc = null; s.cfgSelectedBlock = null;
+    s.astData = null; s.astError = null;
     cmpResult = null; cmpError = null;
     flash = null; healNote = null; lastDecisionNote = null; ed.mark({});
     renderResults(); updateStale(); announce('Loaded ' + (name || 'example'));
@@ -421,7 +433,14 @@ function pageWorkspace(root) {
   function updateInputHint() { inputHint.hidden = !(INPUT_RE.test(s.code) && !s.stdin.trim()); }
 
   /* ── results tabs ── */
-  const TABS = [['output', 'Output'], ['energy', 'Energy'], ['problems', 'Problems'], ['fix', 'Fix']];
+  const TABS = [
+    ['output', 'Output'],
+    ['energy', 'Energy'],
+    ['ast', 'Syntax tree'],
+    ['cfg', 'Control flow'],
+    ['problems', 'Problems'],
+    ['fix', 'Fix']
+  ];
   const tabBtn = {}, badge = {};
   const tabList = el('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Results' });
   const indicator = el('div', { class: 'tab-indicator', 'aria-hidden': 'true' });
@@ -450,16 +469,38 @@ function pageWorkspace(root) {
 
   function renderResults() {
     const r = s.result;
-    TABS.forEach(([id]) => { tabBtn[id].setAttribute('aria-selected', String(id === s.tab)); tabBtn[id].tabIndex = id === s.tab ? 0 : -1; });
+    TABS.forEach(([id]) => {
+      if (tabBtn[id]) {
+        tabBtn[id].setAttribute('aria-selected', String(id === s.tab));
+        tabBtn[id].tabIndex = id === s.tab ? 0 : -1;
+      }
+    });
     const n = r ? r.error_count + r.warning_count : 0;
-    badge.problems.hidden = !n; badge.problems.textContent = String(n);
-    badge.problems.className = 'badge' + (r && r.error_count ? ' bad' : ' warn');
-    badge.fix.hidden = !(s.pending && s.pending.status === 'pending'); badge.fix.textContent = '1'; badge.fix.className = 'badge ok';
+    if (badge.problems) {
+      badge.problems.hidden = !n;
+      badge.problems.textContent = String(n);
+      badge.problems.className = 'badge' + (r && r.error_count ? ' bad' : ' warn');
+    }
+    if (badge.fix) {
+      badge.fix.hidden = !(s.pending && s.pending.status === 'pending');
+      badge.fix.textContent = '1';
+      badge.fix.className = 'badge ok';
+    }
+    if (badge.cfg) {
+      const fnList = s.cfg?.functions || (s.cfg ? [s.cfg] : []);
+      const hasUnreachable = fnList.some(f => f.unreachable && f.unreachable.length > 0);
+      badge.cfg.hidden = !hasUnreachable;
+      badge.cfg.textContent = '!';
+      badge.cfg.className = 'badge warn';
+      badge.cfg.title = 'Dead code detected';
+    }
     panel.setAttribute('aria-labelledby', 'rtab-' + s.tab);
     panel.replaceChildren(
       s.tab === 'problems' ? problemsView() :
       s.tab === 'fix' ? fixView() :
       s.tab === 'energy' ? energyView() :
+      s.tab === 'ast' ? astTabView() :
+      s.tab === 'cfg' ? cfgView() :
       outputView()
     );
     requestAnimationFrame(updateIndicator);
@@ -792,6 +833,472 @@ function pageWorkspace(root) {
     }
 
     return el('div', { class: 'stack-sm' }, parts);
+  }
+
+  /* ── Syntax Tree Tab View ── */
+  function astTabView() {
+    if (s.language === 'java') {
+      return el('div', { class: 'empty' },
+        el('b', { text: 'Syntax tree is not available for Java' }),
+        el('p', { class: 'muted', style: 'margin-top:6px', text: 'Syntax tree visualization is not supported for Java yet. Switch to C++, C, or Python in Code Studio to inspect syntax trees.' })
+      );
+    }
+    const code = s.code ? s.code.trim() : '';
+    if (!code) {
+      return emptyState('No code in editor', 'Write or paste code in the editor to view its syntax tree.');
+    }
+    if (s.astLoading) {
+      return el('div', { class: 'working' }, el('span', { class: 'spinner', 'aria-hidden': 'true' }), 'Building the syntax tree…');
+    }
+    if (s.astError) {
+      return el('div', { class: 'panel' },
+        el('div', { class: 'empty' },
+          el('b', { text: 'Syntax tree unavailable' }),
+          el('p', { class: 'muted', style: 'margin-top:6px', text: s.astError }),
+          el('div', { style: 'margin-top:12px' },
+            el('button', { class: 'btn', onClick: () => { s.astData = null; s.astError = null; fetchAst(); } }, 'Retry')
+          )
+        )
+      );
+    }
+    if (!s.astData) {
+      fetchAst();
+      return el('div', { class: 'working' }, el('span', { class: 'spinner', 'aria-hidden': 'true' }), 'Loading syntax tree…');
+    }
+
+    const roots = (s.astData.tree || []).map(normClang);
+    if (!roots.length) {
+      return emptyState('Parser produced no tree', 'Check syntax or toolchain.');
+    }
+    const treeObj = TreeView(roots);
+    return el('div', { class: 'ast-tab-host' },
+      el('div', { class: 'ast-tab-bar' },
+        el('span', { class: 'chip' }, el('b', { text: String(s.astData.node_count || treeObj.count) }), ' nodes'),
+        el('button', { class: 'btn quiet', onClick: () => { s.astData = null; s.astError = null; fetchAst(); } }, icon('sparkle'), ' Refresh')
+      ),
+      treeObj.root
+    );
+  }
+
+  async function fetchAst() {
+    if (s.astLoading) return;
+    s.astLoading = true;
+    s.astError = null;
+    renderResults();
+    try {
+      const d = await call('/api/cpp/ast', { code: s.code, language: s.language });
+      s.astData = d;
+      s.astLoading = false;
+    } catch (e) {
+      s.astLoading = false;
+      s.astError = e.message || 'Failed to load syntax tree.';
+    }
+    renderResults();
+  }
+
+  /* ── Control Flow Graph (CFG) Tab View ── */
+  function cfgView() {
+    if (s.language !== 'cpp' && s.language !== 'c') {
+      return el('div', { class: 'empty' },
+        el('b', { text: 'Control flow graphs are available for C and C++' }),
+        el('p', { class: 'muted', style: 'margin-top:6px', text: 'Control flow analysis via LLVM IR is currently supported for C and C++. Switch language in the toolbar above.' })
+      );
+    }
+    const code = s.code ? s.code.trim() : '';
+    if (!code) {
+      return emptyState('No code in editor', 'Write or paste C/C++ code, or load an example to view its control flow graph.');
+    }
+    if (s.cfgLoading) {
+      return el('div', { class: 'working' }, el('span', { class: 'spinner', 'aria-hidden': 'true' }), 'Extracting control flow graph with clang…');
+    }
+    if (s.cfgLastError) {
+      return el('div', { class: 'panel' },
+        el('div', { class: 'empty' },
+          el('b', { text: 'Control flow graph unavailable' }),
+          el('p', { class: 'muted', style: 'margin-top:6px', text: s.cfgLastError }),
+          el('div', { style: 'margin-top:12px' },
+            el('button', { class: 'btn', onClick: () => { s.cfg = null; s.cfgLastError = null; fetchCfg(); } }, 'Retry')
+          )
+        )
+      );
+    }
+    if (!s.cfg) {
+      fetchCfg();
+      return el('div', { class: 'working' }, el('span', { class: 'spinner', 'aria-hidden': 'true' }), 'Loading control flow graph…');
+    }
+
+    const fnList = (s.cfg.functions && s.cfg.functions.length) ? s.cfg.functions : [s.cfg];
+    let activeFn = fnList.find(f => f.function === s.cfgSelectedFunc) || fnList[0];
+    if (!activeFn) {
+      return emptyState('No functions found', 'No user-defined functions were discovered in this translation unit.');
+    }
+    s.cfgSelectedFunc = activeFn.function;
+
+    const m = activeFn.metrics || { blocks: 0, edges: 0, cyclomatic: 1, loops: 0 };
+    const blocks = activeFn.blocks || [];
+    const edges = activeFn.edges || [];
+    const unreachable = activeFn.unreachable || [];
+
+    // 1. One-sentence explainer at the top
+    const explainer = el('p', { class: 'cfg-explainer' },
+      'Each box is a stretch of code that runs straight through; arrows show where the program can go next.'
+    );
+
+    // 2. Toolbar: Function selector, metric chips, refresh
+    const toolbar = el('div', { class: 'cfg-toolbar' });
+    if (fnList.length > 1) {
+      const select = el('select', {
+        class: 'cfg-func-select select',
+        'aria-label': 'Select function',
+        onChange: (e) => {
+          s.cfgSelectedFunc = e.target.value;
+          s.cfgSelectedBlock = null;
+          renderResults();
+        }
+      }, fnList.map(f => el('option', { value: f.function, selected: f.function === activeFn.function }, `Function: ${f.function}()`)));
+      toolbar.append(select);
+    } else {
+      toolbar.append(el('span', { class: 'cfg-func-badge' }, el('b', { text: `Function: ${activeFn.function}()` })));
+    }
+
+    const chips = el('div', { class: 'cfg-chips' },
+      el('span', { class: 'chip' }, el('b', { text: String(m.blocks) }), ' blocks'),
+      el('span', { class: 'chip' }, el('b', { text: String(m.edges) }), ' edges'),
+      el('span', { class: 'chip' }, el('b', { text: String(m.cyclomatic) }), ' cyclomatic complexity'),
+      el('span', { class: 'chip' + (m.loops > 0 ? ' ok' : '') }, el('b', { text: String(m.loops) }), ' ' + (m.loops === 1 ? 'loop' : 'loops'))
+    );
+    toolbar.append(chips);
+
+    const btnRefresh = el('button', {
+      class: 'btn quiet',
+      title: 'Re-extract control flow graph from current editor code',
+      onClick: () => { s.cfg = null; s.cfgLastError = null; fetchCfg(); }
+    }, icon('sparkle'), ' Refresh');
+    toolbar.append(btnRefresh);
+
+    // 3. Block selection
+    let selBlock = blocks.find(b => b.id === s.cfgSelectedBlock);
+    if (!selBlock && blocks.length > 0) {
+      selBlock = blocks[0];
+      s.cfgSelectedBlock = selBlock.id;
+    }
+
+    // 4. Adjacency maps
+    const outEdges = {}, inEdges = {};
+    blocks.forEach(b => { outEdges[b.id] = []; inEdges[b.id] = []; });
+    edges.forEach(e => {
+      if (outEdges[e.from]) outEdges[e.from].push(e);
+      if (inEdges[e.to]) inEdges[e.to].push(e);
+    });
+
+    // 5. Layer assignment via BFS from entry
+    const layerMap = {};
+    const entryId = blocks.length ? blocks[0].id : null;
+    if (entryId) {
+      layerMap[entryId] = 0;
+      const q = [entryId];
+      while (q.length) {
+        const cur = q.shift();
+        const curL = layerMap[cur];
+        (outEdges[cur] || []).forEach(e => {
+          if (layerMap[e.to] === undefined) {
+            layerMap[e.to] = curL + 1;
+            q.push(e.to);
+          }
+        });
+      }
+    }
+    let maxL = 0;
+    Object.values(layerMap).forEach(l => { if (l > maxL) maxL = l; });
+    blocks.forEach(b => {
+      if (layerMap[b.id] === undefined) layerMap[b.id] = maxL + 1;
+    });
+
+    const layers = [];
+    blocks.forEach(b => {
+      const l = layerMap[b.id];
+      if (!layers[l]) layers[l] = [];
+      layers[l].push(b);
+    });
+
+    // 6. Coordinates calculation
+    const NODE_W = 186;
+    const NODE_H = 74;
+    const GAP_X = 36;
+    const GAP_Y = 56;
+    const PAD_X = 36;
+    const PAD_Y = 28;
+
+    let maxRowW = 0;
+    layers.forEach(row => {
+      if (!row) return;
+      const rowW = row.length * NODE_W + (row.length - 1) * GAP_X;
+      if (rowW > maxRowW) maxRowW = rowW;
+    });
+
+    const svgW = Math.max(540, maxRowW + PAD_X * 2 + 80);
+    const totalL = layers.length;
+    const svgH = Math.max(260, PAD_Y * 2 + totalL * NODE_H + Math.max(0, totalL - 1) * GAP_Y + 20);
+
+    const coords = {};
+    layers.forEach((row, lIdx) => {
+      if (!row) return;
+      const rowW = row.length * NODE_W + (row.length - 1) * GAP_X;
+      const startX = PAD_X + (maxRowW - rowW) / 2;
+      const y = PAD_Y + lIdx * (NODE_H + GAP_Y);
+      row.forEach((b, i) => {
+        const x = startX + i * (NODE_W + GAP_X);
+        coords[b.id] = { x, y, w: NODE_W, h: NODE_H, layer: lIdx };
+      });
+    });
+
+    // 7. SVG Defs (Markers)
+    const defs = svg('defs', null,
+      svg('marker', { id: 'cfg-arrow-true', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse' },
+        svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', fill: 'var(--ok, #24b47e)' })),
+      svg('marker', { id: 'cfg-arrow-false', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse' },
+        svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', fill: 'var(--bad, #e5484d)' })),
+      svg('marker', { id: 'cfg-arrow-jump', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse' },
+        svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', fill: 'var(--ink-3, #8a8a8a)' })),
+      svg('marker', { id: 'cfg-arrow-switch', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse' },
+        svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', fill: 'var(--ink-2, #666666)' }))
+    );
+
+    // 8. Edges
+    const edgesGroup = svg('g', { class: 'cfg-edges-group' });
+    const edgeLabelsGroup = svg('g', { class: 'cfg-edge-labels-group' });
+
+    edges.forEach(e => {
+      const A = coords[e.from];
+      const B = coords[e.to];
+      if (!A || !B) return;
+
+      const isDownward = B.layer > A.layer;
+      let dStr = '';
+      let markerKind = e.kind;
+      if (markerKind !== 'true' && markerKind !== 'false' && markerKind !== 'switch') {
+        markerKind = 'jump';
+      }
+
+      if (isDownward) {
+        const x1 = A.x + A.w / 2;
+        const y1 = A.y + A.h;
+        const x2 = B.x + B.w / 2;
+        const y2 = B.y;
+        const my = (y1 + y2) / 2;
+        dStr = `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
+
+        if (e.kind === 'true' || e.kind === 'false') {
+          const lx = x1 + (x2 - x1) * 0.35 + (e.kind === 'true' ? -18 : 14);
+          const ly = y1 + 18;
+          edgeLabelsGroup.append(
+            svg('text', {
+              class: 'cfg-edge-text ' + e.kind,
+              x: lx,
+              y: ly,
+              'text-anchor': 'middle'
+            }, e.kind)
+          );
+        }
+      } else {
+        // Back edge / Loop
+        const x1 = A.x + A.w;
+        const y1 = A.y + A.h / 2;
+        const x2 = B.x + B.w;
+        const y2 = B.y + B.h / 2;
+        const arcX = Math.max(A.x + A.w, B.x + B.w) + 40;
+        dStr = `M ${x1} ${y1} C ${arcX} ${y1}, ${arcX} ${y2}, ${x2} ${y2}`;
+
+        if (e.kind === 'true' || e.kind === 'false') {
+          edgeLabelsGroup.append(
+            svg('text', {
+              class: 'cfg-edge-text ' + e.kind,
+              x: arcX - 8,
+              y: (y1 + y2) / 2,
+              'text-anchor': 'end'
+            }, e.kind)
+          );
+        }
+      }
+
+      edgesGroup.append(
+        svg('path', {
+          class: 'cfg-edge cfg-edge-' + e.kind,
+          d: dStr,
+          'marker-end': `url(#cfg-arrow-${markerKind})`
+        })
+      );
+    });
+
+    // 9. Nodes
+    const nodesGroup = svg('g', { class: 'cfg-nodes-group' });
+    blocks.forEach(b => {
+      const p = coords[b.id];
+      if (!p) return;
+      const isSel = (selBlock && selBlock.id === b.id);
+      const isUnreach = !b.reachable;
+
+      const nodeG = svg('g', {
+        class: 'cfg-node' + (isSel ? ' selected' : '') + (isUnreach ? ' unreachable' : '') + (b.is_entry ? ' entry' : '') + (b.is_exit ? ' exit' : ''),
+        transform: `translate(${p.x}, ${p.y})`,
+        tabindex: '0',
+        role: 'button',
+        'aria-label': `${b.friendly} (${b.id}), ${b.instructions.length} instructions${isUnreach ? ', unreachable' : ''}`
+      });
+
+      const rect = svg('rect', {
+        width: p.w,
+        height: p.h,
+        rx: '7',
+        ry: '7',
+        class: 'cfg-node-rect'
+      });
+
+      const titleTxt = svg('text', { class: 'cfg-node-title', x: 12, y: 22 }, b.friendly);
+      const idTxt = svg('text', { class: 'cfg-node-id mono', x: 12, y: 42 }, '%' + b.id);
+      const metaTxt = svg('text', { class: 'cfg-node-meta', x: 12, y: 60 },
+        `${b.instructions.length} insts${b.is_entry ? ' · entry' : b.is_exit ? ' · exit' : ''}${isUnreach ? ' · DEAD' : ''}`
+      );
+
+      const onSelect = () => {
+        s.cfgSelectedBlock = b.id;
+        renderResults();
+      };
+      nodeG.addEventListener('click', onSelect);
+      nodeG.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          onSelect();
+        }
+      });
+
+      nodeG.append(rect, titleTxt, idTxt, metaTxt);
+      nodesGroup.append(nodeG);
+    });
+
+    const svgElem = svg('svg', {
+      class: 'cfg-graph-svg',
+      viewBox: `0 0 ${svgW} ${svgH}`,
+      width: svgW,
+      height: svgH,
+      role: 'img',
+      'aria-label': `Control flow graph for ${activeFn.function}`
+    }, defs, edgesGroup, edgeLabelsGroup, nodesGroup);
+
+    const svgWrap = el('div', { class: 'cfg-svg-scroll' }, svgElem);
+
+    // 10. Legend
+    const legend = el('div', { class: 'cfg-legend' },
+      el('span', { class: 'cfg-leg-item' }, el('span', { class: 'cfg-leg-line true' }), 'True branch'),
+      el('span', { class: 'cfg-leg-item' }, el('span', { class: 'cfg-leg-line false' }), 'False branch'),
+      el('span', { class: 'cfg-leg-item' }, el('span', { class: 'cfg-leg-line jump' }), 'Jump / Switch'),
+      el('span', { class: 'cfg-leg-item' }, el('span', { class: 'cfg-leg-box unreach' }), 'Unreachable block')
+    );
+
+    // 11. Unreachable warning line under the graph
+    let warningLine = null;
+    if (unreachable.length > 0) {
+      const msgs = unreachable.map(id => `Block ${id} can never run`);
+      warningLine = el('div', { class: 'cfg-unreachable-warn' },
+        el('span', { class: 'cfg-warn-icon' }, '⚠️'),
+        el('span', { class: 'cfg-warn-msg', text: msgs.join('. ') + '.' })
+      );
+    }
+
+    const graphPane = el('div', { class: 'cfg-graph-pane' },
+      svgWrap,
+      legend,
+      warningLine
+    );
+
+    // 12. Side panel: Instructions & details
+    const sidePane = el('aside', { class: 'cfg-side-pane', 'aria-label': 'Basic block details' });
+    if (selBlock) {
+      const inList = inEdges[selBlock.id] || [];
+      const outList = outEdges[selBlock.id] || [];
+
+      const head = el('div', { class: 'cfg-side-head' },
+        el('div', null,
+          el('h4', { class: 'cfg-side-title', text: selBlock.friendly }),
+          el('div', { class: 'cfg-side-sub mono muted', text: '%' + selBlock.id })
+        ),
+        el('span', {
+          class: 'badge ' + (selBlock.reachable ? (selBlock.is_entry ? 'ok' : 'info') : 'bad'),
+          text: selBlock.reachable ? (selBlock.is_entry ? 'Entry' : 'Reachable') : 'Unreachable'
+        })
+      );
+
+      const navSection = el('div', { class: 'cfg-side-nav' });
+      if (inList.length) {
+        navSection.append(
+          el('div', { class: 'cfg-nav-row' },
+            el('b', { text: 'Predecessors: ' }),
+            ...inList.map(e => el('button', {
+              class: 'linkish',
+              onClick: () => { s.cfgSelectedBlock = e.from; renderResults(); }
+            }, `%${e.from} (${e.kind})`))
+          )
+        );
+      }
+      if (outList.length) {
+        navSection.append(
+          el('div', { class: 'cfg-nav-row' },
+            el('b', { text: 'Successors: ' }),
+            ...outList.map(e => el('button', {
+              class: 'linkish',
+              onClick: () => { s.cfgSelectedBlock = e.to; renderResults(); }
+            }, `%${e.to} (${e.kind})`))
+          )
+        );
+      }
+      if (selBlock.is_exit) {
+        navSection.append(el('div', { class: 'cfg-nav-row muted' }, el('i', { text: 'Function exit block (return)' })));
+      }
+
+      const insts = selBlock.instructions || [];
+      const instBox = el('div', { class: 'cfg-side-insts' },
+        el('div', { class: 'cfg-side-inst-head' },
+          el('span', { class: 'muted', text: `LLVM IR Instructions (${insts.length}):` })
+        ),
+        el('pre', { class: 'cfg-inst-code mono' },
+          insts.length ? insts.map((ln, idx) => el('div', { class: 'cfg-inst-line' },
+            el('span', { class: 'cfg-inst-no muted' }, String(idx + 1).padStart(2, ' ') + '  '),
+            el('span', { text: ln })
+          )) : el('div', { class: 'muted', text: '(no instructions in block)' })
+        )
+      );
+
+      sidePane.append(head, navSection, instBox);
+    } else {
+      sidePane.append(el('div', { class: 'empty' }, 'Click any block in the graph to view its instructions.'));
+    }
+
+    const mainLayout = el('div', { class: 'cfg-main-layout' }, graphPane, sidePane);
+
+    return el('div', { class: 'cfg-view' },
+      explainer,
+      toolbar,
+      mainLayout
+    );
+  }
+
+  async function fetchCfg() {
+    if (s.cfgLoading) return;
+    s.cfgLoading = true;
+    s.cfgLastError = null;
+    renderResults();
+    try {
+      const d = await call('/api/cfg', { code: s.code, language: s.language, function: s.cfgSelectedFunc });
+      s.cfg = d;
+      s.cfgLoading = false;
+      if (d.function && !s.cfgSelectedFunc) {
+        s.cfgSelectedFunc = d.function;
+      }
+    } catch (e) {
+      s.cfgLoading = false;
+      s.cfgLastError = e.message || 'Failed to extract control flow graph.';
+    }
+    renderResults();
   }
 
   /* ── actions ── */
