@@ -165,3 +165,44 @@ def test_api_cfg_invalid_language():
         api_cfg({"code": "print(1)", "language": "python"})
     assert exc_info.value.status == 503
     assert "Control flow graphs are available for C and C++" in str(exc_info.value)
+
+
+@skip_no_clang
+def test_cpp_exception_paths_are_not_reported_unreachable():
+    """C++ calls compile to `invoke`; their landing pads must be reachable, not dead code."""
+    code = """
+    #include <iostream>
+    #include <string>
+    int main() {
+        std::string s = "hi";
+        for (int i = 0; i < 3; i++) { std::cout << s << i << "\\n"; }
+        return 0;
+    }
+    """
+    cfg = extract_cfg(code, language="cpp")
+    fn = next(f for f in cfg["functions"] if f["function"] == "main")
+    assert fn["unreachable"] == []
+    assert any(e["kind"] == "unwind" for e in fn["edges"])
+    # exception edges must not inflate cyclomatic complexity (one loop => 2)
+    assert fn["metrics"]["cyclomatic"] == 2
+
+
+@skip_no_clang
+def test_blocks_report_their_source_lines():
+    """Each block lists the source lines it covers, so the UI can highlight them."""
+    code = (
+        "int f(int n) {\n"          # 1
+        "    int s = 0;\n"          # 2
+        "    if (n > 0) {\n"        # 3
+        "        s = 1;\n"          # 4
+        "    } else {\n"            # 5
+        "        s = 2;\n"          # 6
+        "    }\n"                   # 7
+        "    return s;\n"           # 8
+        "}\n"
+    )
+    cfg = extract_cfg(code, language="c")
+    by_id = {b["id"]: b for b in cfg["blocks"]}
+    assert 3 in by_id["entry"]["lines"]
+    assert by_id["if.then"]["lines"] == [4]
+    assert by_id["if.else"]["lines"] == [6]

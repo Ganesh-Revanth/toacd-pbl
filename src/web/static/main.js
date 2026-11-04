@@ -181,7 +181,10 @@ function themeButton() {
     onclick: () => {
       mode = modes[(modes.indexOf(mode) + 1) % modes.length];
       store.set('theme', mode);
+      const root = document.documentElement;
+      root.classList.add('theme-fade');      // colours ease across instead of snapping
       apply();
+      setTimeout(() => root.classList.remove('theme-fade'), 320);
     }
   }, iconWrap, labelSpan);
 

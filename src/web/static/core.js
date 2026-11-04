@@ -43,7 +43,13 @@ function svg(tag, attrs, ...kids) {
 function announce(msg) { const l = $('#live'); if (l) { l.textContent = ''; setTimeout(() => { l.textContent = msg; }, 30); } }
 
 /* ── API ─────────────────────────────────────────────────────────────── */
+let _busyCount = 0;
+function _busyTick(d) { _busyCount = Math.max(0, _busyCount + d); document.documentElement.classList.toggle('is-busy', _busyCount > 0); }
 async function call(path, body) {
+  _busyTick(1);
+  try { return await _call(path, body); } finally { _busyTick(-1); }
+}
+async function _call(path, body) {
   const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
   let r;
   try { r = await fetch(path, opt); } catch (e) { throw new Error('Cannot reach the local server. Is it still running?'); }
@@ -192,25 +198,48 @@ function Editor({ value = '', label, language = 'cpp', onChange, onRun, onCursor
     autocomplete: 'off', autocorrect: 'off', 'aria-label': label,
   });
   ta.value = value;
-  const codeWrap = el('div', { class: 'code-wrap' }, highlightPre, ta);
+  const bandInner = el('div', { class: 'band-inner' });
+  const bandLayer = el('div', { class: 'band-layer', 'aria-hidden': 'true' }, bandInner);
+  const codeWrap = el('div', { class: 'code-wrap' }, bandLayer, highlightPre, ta);
   const root = el('div', { class: 'editor' }, gutter, codeWrap);
   let marks = {};
   let tabEscape = false;
   let currentLang = language || 'cpp';
 
+  let band = new Set();
+  let curLine = 1;
+  const LINE_H = 20;
+  const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function markCur() {
+    gutter.querySelectorAll('.cur').forEach(x => x.classList.remove('cur'));
+    const sp = gutter.children[curLine - 1];
+    if (sp) sp.classList.add('cur');
+  }
+  function syncBand() { bandInner.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`; }
+  function paintBand() {
+    bandInner.replaceChildren(...[...band].map(n => el('div', { class: 'band-line', style: `top:${(n - 1) * LINE_H}px` })));
+    syncBand();
+  }
+  function paintGutter() {
+    const n = ta.value.split('\n').length;
+    gutter.replaceChildren();
+    for (let i = 1; i <= n; i++) {
+      gutter.append(el('span', { class: ((marks[i] || '') + (band.has(i) ? ' flow' : '')).trim(), text: String(i) }));
+    }
+    markCur();
+    gutter.scrollTop = ta.scrollTop;
+  }
   function paint() {
     const text = ta.value;
-    const n = text.split('\n').length;
-    gutter.replaceChildren();
-    for (let i = 1; i <= n; i++) gutter.append(el('span', { class: marks[i] || '', text: String(i) }));
-    gutter.scrollTop = ta.scrollTop;
+    paintGutter();
     highlightPre.innerHTML = highlightCode(text, currentLang) + '\n';
     highlightPre.scrollTop = ta.scrollTop;
     highlightPre.scrollLeft = ta.scrollLeft;
   }
-  ta.addEventListener('input', () => { paint(); onChange && onChange(ta.value); });
+  ta.addEventListener('input', () => { band = new Set(); paintBand(); paint(); onChange && onChange(ta.value); });
   ta.addEventListener('scroll', () => {
     gutter.scrollTop = ta.scrollTop;
+    syncBand();
     highlightPre.scrollTop = ta.scrollTop;
     highlightPre.scrollLeft = ta.scrollLeft;
   });
@@ -226,9 +255,10 @@ function Editor({ value = '', label, language = 'cpp', onChange, onRun, onCursor
     if (e.key !== 'Tab' && e.key !== 'Escape') tabEscape = false;
   });
   const reportCursor = () => {
-    if (!onCursor) return;
     const pos = ta.selectionStart, before = ta.value.slice(0, pos);
-    onCursor(before.split('\n').length, pos - before.lastIndexOf('\n'));
+    const ln = before.split('\n').length;
+    if (ln !== curLine) { curLine = ln; markCur(); }
+    if (onCursor) onCursor(ln, pos - before.lastIndexOf('\n'));
   };
   ['keyup', 'click', 'focus', 'input'].forEach(ev => ta.addEventListener(ev, reportCursor));
   paint();
@@ -237,7 +267,19 @@ function Editor({ value = '', label, language = 'cpp', onChange, onRun, onCursor
     root, textarea: ta,
     focus: () => ta.focus(),
     get: () => ta.value,
-    set(v) { ta.value = v; paint(); onChange && onChange(v); },
+    set(v) { ta.value = v; band = new Set(); paintBand(); paint(); onChange && onChange(v); },
+    /** Highlight source lines (e.g. a control-flow block); optionally scroll them into view. */
+    band(lines, opts) {
+      band = new Set((lines || []).filter(n => Number.isInteger(n) && n > 0));
+      paintBand(); paintGutter();
+      if (opts && opts.scroll && band.size) {
+        const first = Math.min(...band), top = (first - 1) * LINE_H;
+        const view = ta.clientHeight;
+        if (top < ta.scrollTop || top + LINE_H > ta.scrollTop + view - LINE_H) {
+          ta.scrollTo({ top: Math.max(0, top - view / 3), behavior: reduceMotion() ? 'auto' : 'smooth' });
+        }
+      }
+    },
     setLanguage(lang) { currentLang = lang || 'cpp'; paint(); },
     mark(map) { marks = map || {}; paint(); },
     goto(line) {

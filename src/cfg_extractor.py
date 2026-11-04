@@ -53,6 +53,14 @@ def _get_friendly(label: str, is_entry: bool, term_inst: str, insts: List[str]) 
     term = term_inst.lower()
     if is_entry:
         return "entry"
+    if "lpad" in lbl or "catch" in lbl:
+        return "exception handler"
+    if "ehcleanup" in lbl or "cleanup" in lbl:
+        return "exception cleanup"
+    if "eh.resume" in lbl or "terminate" in lbl:
+        return "rethrow"
+    if "invoke.cont" in lbl:
+        return "after call"
     if "if.then" in lbl or "then" in lbl:
         return "then branch"
     if "if.else" in lbl or "else" in lbl:
@@ -105,6 +113,28 @@ def extract_cfg_from_ll(ll_text: str, src_filename: str = "main.cpp") -> List[Di
         line_no = int(line_m.group(1)) if line_m else 0
         file_path = di_files.get(file_id, "") if file_id else ""
         di_subs[sub_id] = {"name": fn_name, "file": file_path, "line": line_no}
+
+    # DILocation ids -> source line, used to tell which source lines each block covers
+    di_locs: Dict[str, int] = {}
+    for m in re.finditer(r'!(\d+)\s*=\s*(?:distinct\s*)?!DILocation\(line:\s*(\d+)', ll_text):
+        di_locs[m.group(1)] = int(m.group(2))
+
+    def _block_source_lines(raw_lines: List[str]) -> List[int]:
+        # A plain `br label` is only glue back to the join point and is often tagged with the
+        # closing brace or `else` line, so it is ignored when the block has real statements.
+        found: Set[int] = set()
+        glue: Set[int] = set()
+        for ln in raw_lines:
+            if ln.startswith("#dbg"):
+                ids = re.findall(r'!(\d+)\)\s*$', ln)
+            else:
+                ids = re.findall(r'!dbg\s*!(\d+)', ln)
+            target = glue if re.match(r'^br\s+label\b', ln) else found
+            for i in ids:
+                n = di_locs.get(i, 0)
+                if n > 0:
+                    target.add(n)
+        return sorted(found or glue)
 
     src_base = os.path.basename(src_filename)
 
@@ -209,19 +239,27 @@ def extract_cfg_from_ll(ll_text: str, src_filename: str = "main.cpp") -> List[Di
                     b_edges.append({"from": lbl, "to": m_case.group(1), "kind": "switch"})
             else:
                 # 2. Conditional branch
-                m_cond = re.search(r'\bbr\s+i1\s+[^,]+,\s*label\s+%([a-zA-Z0-9_.]+),\s*label\s+%([a-zA-Z0-9_.]+)', term_str)
+                # `invoke` ends the block with: to label %normal unwind label %handler
+                m_inv = re.search(r'\bto\s+label\s+%([a-zA-Z0-9_.]+)\s+unwind\s+label\s+%([a-zA-Z0-9_.]+)', term_str)
+                if m_inv:
+                    # C++ call that may throw: a normal path and an exception path
+                    b_edges.append({"from": lbl, "to": m_inv.group(1), "kind": "jump"})
+                    b_edges.append({"from": lbl, "to": m_inv.group(2), "kind": "unwind"})
+                    m_cond = None
+                else:
+                    m_cond = re.search(r'\bbr\s+i1\s+[^,]+,\s*label\s+%([a-zA-Z0-9_.]+),\s*label\s+%([a-zA-Z0-9_.]+)', term_str)
                 if m_cond:
                     b_edges.append({"from": lbl, "to": m_cond.group(1), "kind": "true"})
                     b_edges.append({"from": lbl, "to": m_cond.group(2), "kind": "false"})
-                else:
+                elif not m_inv:
                     # 3. Unconditional jump
                     m_uncond = re.search(r'\bbr\s+label\s+%([a-zA-Z0-9_.]+)', term_str)
                     if m_uncond:
                         b_edges.append({"from": lbl, "to": m_uncond.group(1), "kind": "jump"})
-                    elif re.search(r'\b(ret|unreachable)\b', term_str):
+                    elif re.search(r'\b(ret|unreachable|resume)\b', term_str):
                         is_exit = True
 
-            if not b_edges and not is_exit and re.search(r'\b(ret|unreachable)\b', term_str):
+            if not b_edges and not is_exit and re.search(r'\b(ret|unreachable|resume)\b', term_str):
                 is_exit = True
 
             for e in b_edges:
@@ -241,6 +279,7 @@ def extract_cfg_from_ll(ll_text: str, src_filename: str = "main.cpp") -> List[Di
                 "is_entry": is_entry,
                 "is_exit": is_exit,
                 "reachable": True,
+                "lines": _block_source_lines(lines),
             })
 
         # Adjacency map for traversal
@@ -292,7 +331,23 @@ def extract_cfg_from_ll(ll_text: str, src_filename: str = "main.cpp") -> List[Di
 
         num_b = len(blocks)
         num_e = len(edges)
-        cyclomatic = max(1, num_e - num_b + 2)
+        # Cyclomatic complexity follows normal control flow only: exception
+        # (unwind) edges and the blocks only they reach are left out.
+        normal_adj: Dict[str, List[str]] = {b["id"]: [] for b in blocks}
+        for e in edges:
+            if e["kind"] != "unwind" and e["from"] in normal_adj:
+                normal_adj[e["from"]].append(e["to"])
+        normal_set = {entry_id}
+        stack = [entry_id]
+        while stack:
+            cur = stack.pop()
+            for nxt in normal_adj.get(cur, []):
+                if nxt not in normal_set:
+                    normal_set.add(nxt)
+                    stack.append(nxt)
+        n_norm = len(normal_set)
+        e_norm = sum(1 for e in edges if e["kind"] != "unwind" and e["from"] in normal_set)
+        cyclomatic = max(1, e_norm - n_norm + 2)
 
         functions.append({
             "function": display_name,

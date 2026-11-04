@@ -469,6 +469,7 @@ function pageWorkspace(root) {
 
   function renderResults() {
     const r = s.result;
+    if (s.tab !== 'cfg') { ed.band([]); s.cfgBandKey = null; }   // highlight belongs to the graph only
     TABS.forEach(([id]) => {
       if (tabBtn[id]) {
         tabBtn[id].setAttribute('aria-selected', String(id === s.tab));
@@ -941,7 +942,7 @@ function pageWorkspace(root) {
 
     // 1. One-sentence explainer at the top
     const explainer = el('p', { class: 'cfg-explainer' },
-      'Each box is a stretch of code that runs straight through; arrows show where the program can go next.'
+      'Each box is a stretch of code that runs straight through; arrows show where the program can go next. Click a box to highlight its code.'
     );
 
     // 2. Toolbar: Function selector, metric chips, refresh
@@ -975,6 +976,15 @@ function pageWorkspace(root) {
       onClick: () => { s.cfg = null; s.cfgLastError = null; fetchCfg(); }
     }, icon('sparkle'), ' Refresh');
     toolbar.append(btnRefresh);
+    const btnExpand = el('button', {
+      class: 'btn quiet', title: 'Open the graph large (Esc to close)',
+      onClick: () => { s.cfgFull = true; renderResults(); }
+    }, 'Expand');
+    toolbar.append(btnExpand);
+    if (!window.__cfgEsc) {
+      window.__cfgEsc = true;
+      document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && s.cfgFull) { s.cfgFull = false; renderResults(); } });
+    }
 
     // 3. Block selection
     let selBlock = blocks.find(b => b.id === s.cfgSelectedBlock);
@@ -982,6 +992,11 @@ function pageWorkspace(root) {
       selBlock = blocks[0];
       s.cfgSelectedBlock = selBlock.id;
     }
+
+    // Highlight the selected block's source lines (scroll only when the block changes)
+    const bandKey = activeFn.function + ':' + (selBlock ? selBlock.id : '');
+    ed.band(selBlock ? selBlock.lines : [], { scroll: s.cfgBandKey !== bandKey });
+    s.cfgBandKey = bandKey;
 
     // 4. Adjacency maps
     const outEdges = {}, inEdges = {};
@@ -991,143 +1006,173 @@ function pageWorkspace(root) {
       if (inEdges[e.to]) inEdges[e.to].push(e);
     });
 
-    // 5. Layer assignment via BFS from entry
-    const layerMap = {};
+    // 5. Layered layout (Sugiyama-style): back-edges removed, longest-path layers,
+    //    dummy waypoints for edges that skip layers, barycenter ordering.
+    const NODE_W = 156, NODE_H = 56, DUMMY_W = 20;
+    const GAP_X = 20, GAP_Y = 54, PAD_X = 28, PAD_Y = 24, LANE = 16;
     const entryId = blocks.length ? blocks[0].id : null;
-    if (entryId) {
-      layerMap[entryId] = 0;
-      const q = [entryId];
-      while (q.length) {
-        const cur = q.shift();
-        const curL = layerMap[cur];
-        (outEdges[cur] || []).forEach(e => {
-          if (layerMap[e.to] === undefined) {
-            layerMap[e.to] = curL + 1;
-            q.push(e.to);
-          }
-        });
+    const idSet = new Set(blocks.map(b => b.id));
+    const okEdges = edges.filter(e => idSet.has(e.from) && idSet.has(e.to));
+
+    // 5a. classify back edges with a DFS from entry (loops)
+    const state = {}, backSet = new Set(), order = [];
+    const dfs = (u) => {
+      state[u] = 1;
+      (outEdges[u] || []).forEach(e => {
+        if (!idSet.has(e.to)) return;
+        if (state[e.to] === 1) backSet.add(e);
+        else if (!state[e.to]) dfs(e.to);
+      });
+      state[u] = 2; order.push(u);
+    };
+    if (entryId) dfs(entryId);
+    blocks.forEach(b => { if (!state[b.id]) dfs(b.id); });
+    const topo = order.slice().reverse();
+    const fwd = okEdges.filter(e => !backSet.has(e) && e.from !== e.to);
+
+    // 5b. longest-path layering
+    const layerOf = {};
+    topo.forEach(id => { layerOf[id] = 0; });
+    topo.forEach(id => {
+      fwd.forEach(e => { if (e.from === id) layerOf[e.to] = Math.max(layerOf[e.to], layerOf[id] + 1); });
+    });
+    // pull sink-ish nodes (like return) to the bottom of the graph
+    const maxLayer = Math.max(0, ...Object.values(layerOf));
+    blocks.forEach(b => { if (b.is_exit && !(outEdges[b.id] || []).length) layerOf[b.id] = maxLayer; });
+
+    // 5c. build rows including dummy nodes for long edges
+    const rows = [];
+    const nodeInfo = {};                     // key -> {key, w, dummy, layer}
+    const addNode = (key, w, dummy, layer) => {
+      nodeInfo[key] = { key, w, dummy, layer };
+      (rows[layer] = rows[layer] || []).push(key);
+    };
+    topo.forEach(id => addNode(id, NODE_W, false, layerOf[id]));
+    const routes = [];                        // forward edges as key chains
+    fwd.forEach((e, i) => {
+      const chain = [e.from];
+      for (let l = layerOf[e.from] + 1; l < layerOf[e.to]; l++) {
+        const k = `~${i}_${l}`; addNode(k, DUMMY_W, true, l); chain.push(k);
       }
+      chain.push(e.to);
+      routes.push({ e, chain });
+    });
+    for (let l = 0; l < rows.length; l++) rows[l] = rows[l] || [];
+    const up = {}, down = {};
+    Object.keys(nodeInfo).forEach(k => { up[k] = []; down[k] = []; });
+    routes.forEach(r => r.chain.forEach((k, i) => {
+      if (i > 0) up[k].push(r.chain[i - 1]);
+      if (i < r.chain.length - 1) down[k].push(r.chain[i + 1]);
+    }));
+
+    // 5d. crossing reduction: a few barycenter sweeps
+    const pos = {};
+    const reindex = () => rows.forEach(row => row.forEach((k, i) => { pos[k] = i; }));
+    reindex();
+    const bary = (k, nb) => nb[k].length ? nb[k].reduce((a, n) => a + pos[n], 0) / nb[k].length : pos[k];
+    for (let it = 0; it < 6; it++) {
+      for (let l = 1; l < rows.length; l++) { rows[l].sort((a, b) => bary(a, up) - bary(b, up) || pos[a] - pos[b]); reindex(); }
+      for (let l = rows.length - 2; l >= 0; l--) { rows[l].sort((a, b) => bary(a, down) - bary(b, down) || pos[a] - pos[b]); reindex(); }
     }
-    let maxL = 0;
-    Object.values(layerMap).forEach(l => { if (l > maxL) maxL = l; });
-    blocks.forEach(b => {
-      if (layerMap[b.id] === undefined) layerMap[b.id] = maxL + 1;
+
+    // 5e. x coordinates: centre rows, then pull towards neighbours without overlap
+    const X = {};
+    const rowWidth = row => row.reduce((a, k) => a + nodeInfo[k].w, 0) + Math.max(0, row.length - 1) * GAP_X;
+    const maxRowW = Math.max(NODE_W, ...rows.map(rowWidth));
+    rows.forEach(row => {
+      let x = (maxRowW - rowWidth(row)) / 2;
+      row.forEach(k => { X[k] = x + nodeInfo[k].w / 2; x += nodeInfo[k].w + GAP_X; });
     });
-
-    const layers = [];
-    blocks.forEach(b => {
-      const l = layerMap[b.id];
-      if (!layers[l]) layers[l] = [];
-      layers[l].push(b);
-    });
-
-    // 6. Coordinates calculation
-    const NODE_W = 186;
-    const NODE_H = 74;
-    const GAP_X = 36;
-    const GAP_Y = 56;
-    const PAD_X = 36;
-    const PAD_Y = 28;
-
-    let maxRowW = 0;
-    layers.forEach(row => {
-      if (!row) return;
-      const rowW = row.length * NODE_W + (row.length - 1) * GAP_X;
-      if (rowW > maxRowW) maxRowW = rowW;
-    });
-
-    const svgW = Math.max(540, maxRowW + PAD_X * 2 + 80);
-    const totalL = layers.length;
-    const svgH = Math.max(260, PAD_Y * 2 + totalL * NODE_H + Math.max(0, totalL - 1) * GAP_Y + 20);
+    const settle = (row, nbMap) => {
+      const want = row.map(k => nbMap[k].length ? nbMap[k].reduce((a, n) => a + X[n], 0) / nbMap[k].length : X[k]);
+      row.forEach((k, i) => { X[k] = want[i]; });
+      for (let i = 1; i < row.length; i++) {            // left to right push
+        const min = X[row[i - 1]] + (nodeInfo[row[i - 1]].w + nodeInfo[row[i]].w) / 2 + GAP_X;
+        if (X[row[i]] < min) X[row[i]] = min;
+      }
+      for (let i = row.length - 2; i >= 0; i--) {       // right to left push
+        const max = X[row[i + 1]] - (nodeInfo[row[i + 1]].w + nodeInfo[row[i]].w) / 2 - GAP_X;
+        if (X[row[i]] > max) X[row[i]] = max;
+      }
+    };
+    for (let it = 0; it < 4; it++) {
+      for (let l = 1; l < rows.length; l++) settle(rows[l], up);
+      for (let l = rows.length - 2; l >= 0; l--) settle(rows[l], down);
+    }
+    let minX = Infinity, maxX = -Infinity;
+    Object.values(nodeInfo).forEach(n => { minX = Math.min(minX, X[n.key] - n.w / 2); maxX = Math.max(maxX, X[n.key] + n.w / 2); });
+    const shiftX = PAD_X - minX;
+    Object.keys(X).forEach(k => { X[k] += shiftX; });
+    const contentRight = maxX + shiftX;
 
     const coords = {};
-    layers.forEach((row, lIdx) => {
-      if (!row) return;
-      const rowW = row.length * NODE_W + (row.length - 1) * GAP_X;
-      const startX = PAD_X + (maxRowW - rowW) / 2;
-      const y = PAD_Y + lIdx * (NODE_H + GAP_Y);
-      row.forEach((b, i) => {
-        const x = startX + i * (NODE_W + GAP_X);
-        coords[b.id] = { x, y, w: NODE_W, h: NODE_H, layer: lIdx };
-      });
+    blocks.forEach(b => {
+      const L = layerOf[b.id];
+      coords[b.id] = { x: X[b.id] - NODE_W / 2, y: PAD_Y + L * (NODE_H + GAP_Y), w: NODE_W, h: NODE_H, layer: L };
     });
+    const rowY = l => PAD_Y + l * (NODE_H + GAP_Y);
+    const backList = okEdges.filter(e => backSet.has(e) || e.from === e.to);
+    const svgW = contentRight + PAD_X + backList.length * LANE + (backList.length ? 14 : 0);
+    const svgH = PAD_Y * 2 + rows.length * NODE_H + Math.max(0, rows.length - 1) * GAP_Y;
 
-    // 7. SVG Defs (Markers)
-    const defs = svg('defs', null,
-      svg('marker', { id: 'cfg-arrow-true', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse' },
-        svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', fill: 'var(--ok, #24b47e)' })),
-      svg('marker', { id: 'cfg-arrow-false', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse' },
-        svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', fill: 'var(--bad, #e5484d)' })),
-      svg('marker', { id: 'cfg-arrow-jump', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse' },
-        svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', fill: 'var(--ink-3, #8a8a8a)' })),
-      svg('marker', { id: 'cfg-arrow-switch', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse' },
-        svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', fill: 'var(--ink-2, #666666)' }))
-    );
+    // 7. SVG defs: one arrowhead per edge kind, using theme tokens that exist
+    const mk = (id, cls) => svg('marker', { id, viewBox: '0 0 10 10', refX: '9', refY: '5', markerUnits: 'userSpaceOnUse', markerWidth: '10', markerHeight: '10', orient: 'auto' },
+      svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', class: 'cfg-arrowhead ' + cls }));
+    const defs = svg('defs', null, mk('cfg-arrow-true', 'true'), mk('cfg-arrow-false', 'false'),
+      mk('cfg-arrow-jump', 'jump'), mk('cfg-arrow-switch', 'switch'), mk('cfg-arrow-back', 'back'));
 
     // 8. Edges
     const edgesGroup = svg('g', { class: 'cfg-edges-group' });
     const edgeLabelsGroup = svg('g', { class: 'cfg-edge-labels-group' });
+    const selId = selBlock ? selBlock.id : null;
+    const markerFor = k => (k === 'true' || k === 'false' || k === 'switch') ? k : 'jump';
+    const addLabel = (text, x, y, kind) => {
+      const w = text.length * 6.6 + 10;
+      edgeLabelsGroup.append(
+        svg('rect', { class: 'cfg-edge-pill', x: x - w / 2, y: y - 9, width: w, height: 16, rx: 8 }),
+        svg('text', { class: 'cfg-edge-text ' + kind, x, y: y + 3, 'text-anchor': 'middle' }, text));
+    };
+    const hot = e => selId && (e.from === selId || e.to === selId);
 
-    edges.forEach(e => {
-      const A = coords[e.from];
-      const B = coords[e.to];
+    // outgoing ports spread along the bottom edge so sibling edges do not overlap
+    const outCount = {}, outIdx = {}, inCount = {}, inIdx = {};
+    routes.forEach(r => { outCount[r.e.from] = (outCount[r.e.from] || 0) + 1; inCount[r.e.to] = (inCount[r.e.to] || 0) + 1; });
+    routes.slice().sort((a, b) => X[a.chain[1]] - X[b.chain[1]]).forEach(r => { outIdx[r.e.from] = (outIdx[r.e.from] || 0); r._o = outIdx[r.e.from]++; });
+    routes.slice().sort((a, b) => X[a.chain[a.chain.length - 2]] - X[b.chain[b.chain.length - 2]]).forEach(r => { inIdx[r.e.to] = (inIdx[r.e.to] || 0); r._i = inIdx[r.e.to]++; });
+    const port = (n, i) => n <= 1 ? 0 : (i - (n - 1) / 2) * Math.min(34, (NODE_W - 40) / (n - 1));
+
+    routes.forEach(r => {
+      const e = r.e, c = r.chain;
+      const A = coords[e.from], B = coords[e.to];
+      const pts = [{ x: A.x + A.w / 2 + port(outCount[e.from], r._o), y: A.y + A.h }];
+      for (let i = 1; i < c.length - 1; i++) {
+        const l = nodeInfo[c[i]].layer;
+        pts.push({ x: X[c[i]], y: rowY(l) + NODE_H / 2 });
+      }
+      pts.push({ x: B.x + B.w / 2 + port(inCount[e.to], r._i), y: B.y - 1 });
+      let d = `M ${pts[0].x} ${pts[0].y}`;
+      for (let i = 1; i < pts.length; i++) {
+        const p = pts[i - 1], q = pts[i], my = (p.y + q.y) / 2;
+        d += ` C ${p.x} ${my}, ${q.x} ${my}, ${q.x} ${q.y}`;
+      }
+      const cls = 'cfg-edge cfg-edge-' + e.kind + (hot(e) ? ' hot' : '');
+      edgesGroup.append(svg('path', { class: cls, d, 'data-from': e.from, 'data-to': e.to, 'marker-end': `url(#cfg-arrow-${markerFor(e.kind)})` }));
+      if (e.kind === 'true' || e.kind === 'false') {
+        const nx = pts[1].x;
+        addLabel(e.kind, pts[0].x + (nx - pts[0].x) * 0.22 + (nx === pts[0].x ? (e.kind === 'true' ? -20 : 20) : 0), pts[0].y + 15, e.kind);
+      }
+    });
+
+    // loops: route around the right-hand side with rounded corners
+    backList.forEach((e, i) => {
+      const A = coords[e.from], B = coords[e.to];
       if (!A || !B) return;
-
-      const isDownward = B.layer > A.layer;
-      let dStr = '';
-      let markerKind = e.kind;
-      if (markerKind !== 'true' && markerKind !== 'false' && markerKind !== 'switch') {
-        markerKind = 'jump';
-      }
-
-      if (isDownward) {
-        const x1 = A.x + A.w / 2;
-        const y1 = A.y + A.h;
-        const x2 = B.x + B.w / 2;
-        const y2 = B.y;
-        const my = (y1 + y2) / 2;
-        dStr = `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
-
-        if (e.kind === 'true' || e.kind === 'false') {
-          const lx = x1 + (x2 - x1) * 0.35 + (e.kind === 'true' ? -18 : 14);
-          const ly = y1 + 18;
-          edgeLabelsGroup.append(
-            svg('text', {
-              class: 'cfg-edge-text ' + e.kind,
-              x: lx,
-              y: ly,
-              'text-anchor': 'middle'
-            }, e.kind)
-          );
-        }
-      } else {
-        // Back edge / Loop
-        const x1 = A.x + A.w;
-        const y1 = A.y + A.h / 2;
-        const x2 = B.x + B.w;
-        const y2 = B.y + B.h / 2;
-        const arcX = Math.max(A.x + A.w, B.x + B.w) + 40;
-        dStr = `M ${x1} ${y1} C ${arcX} ${y1}, ${arcX} ${y2}, ${x2} ${y2}`;
-
-        if (e.kind === 'true' || e.kind === 'false') {
-          edgeLabelsGroup.append(
-            svg('text', {
-              class: 'cfg-edge-text ' + e.kind,
-              x: arcX - 8,
-              y: (y1 + y2) / 2,
-              'text-anchor': 'end'
-            }, e.kind)
-          );
-        }
-      }
-
-      edgesGroup.append(
-        svg('path', {
-          class: 'cfg-edge cfg-edge-' + e.kind,
-          d: dStr,
-          'marker-end': `url(#cfg-arrow-${markerKind})`
-        })
-      );
+      const lx = contentRight + 14 + i * LANE, r = 8;
+      const sy = A.y + A.h / 2, ty = B.y + B.h / 2, sx = A.x + A.w, tx = B.x + B.w;
+      const dirUp = ty < sy ? -1 : 1;
+      const d = `M ${sx} ${sy} H ${lx - r} Q ${lx} ${sy} ${lx} ${sy + dirUp * r} V ${ty - dirUp * r} Q ${lx} ${ty} ${lx - r} ${ty} H ${tx + 1}`;
+      edgesGroup.append(svg('path', { class: 'cfg-edge cfg-edge-back cfg-edge-' + e.kind + (hot(e) ? ' hot' : ''), d, 'data-from': e.from, 'data-to': e.to, 'marker-end': 'url(#cfg-arrow-back)' }));
+      addLabel('loop', lx - 24, (sy + ty) / 2, 'back');
     });
 
     // 9. Nodes
@@ -1141,6 +1186,7 @@ function pageWorkspace(root) {
       const nodeG = svg('g', {
         class: 'cfg-node' + (isSel ? ' selected' : '') + (isUnreach ? ' unreachable' : '') + (b.is_entry ? ' entry' : '') + (b.is_exit ? ' exit' : ''),
         transform: `translate(${p.x}, ${p.y})`,
+        style: `--i:${p.layer}`,
         tabindex: '0',
         role: 'button',
         'aria-label': `${b.friendly} (${b.id}), ${b.instructions.length} instructions${isUnreach ? ', unreachable' : ''}`
@@ -1154,10 +1200,10 @@ function pageWorkspace(root) {
         class: 'cfg-node-rect'
       });
 
-      const titleTxt = svg('text', { class: 'cfg-node-title', x: 12, y: 22 }, b.friendly);
+      const titleTxt = svg('text', { class: 'cfg-node-title', x: 12, y: 23 }, b.friendly);
       const idTxt = svg('text', { class: 'cfg-node-id mono', x: 12, y: 42 }, '%' + b.id);
-      const metaTxt = svg('text', { class: 'cfg-node-meta', x: 12, y: 60 },
-        `${b.instructions.length} insts${b.is_entry ? ' · entry' : b.is_exit ? ' · exit' : ''}${isUnreach ? ' · DEAD' : ''}`
+      const metaTxt = svg('text', { class: 'cfg-node-meta', x: p.w - 10, y: 42, 'text-anchor': 'end' },
+        `${b.instructions.length} insts${isUnreach ? ' · DEAD' : ''}`
       );
 
       const onSelect = () => {
@@ -1165,6 +1211,15 @@ function pageWorkspace(root) {
         renderResults();
       };
       nodeG.addEventListener('click', onSelect);
+      // hovering or focusing a box fades every arrow that does not touch it
+      const focusOn = () => {
+        const root = nodeG.ownerSVGElement; if (!root) return;
+        root.classList.add('focusing');
+        root.querySelectorAll('.cfg-edge').forEach(p => p.classList.toggle('rel', p.dataset.from === b.id || p.dataset.to === b.id));
+      };
+      const focusOff = () => { const root = nodeG.ownerSVGElement; if (root) root.classList.remove('focusing'); };
+      nodeG.addEventListener('mouseenter', focusOn); nodeG.addEventListener('mouseleave', focusOff);
+      nodeG.addEventListener('focus', focusOn); nodeG.addEventListener('blur', focusOff);
       nodeG.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter' || ev.key === ' ') {
           ev.preventDefault();
@@ -1179,19 +1234,29 @@ function pageWorkspace(root) {
     const svgElem = svg('svg', {
       class: 'cfg-graph-svg',
       viewBox: `0 0 ${svgW} ${svgH}`,
-      width: svgW,
-      height: svgH,
+      width: Math.round(svgW),
+      height: Math.round(svgH),
+      style: `width:100%;max-width:${Math.round(svgW)}px;min-width:${Math.round(svgW * 0.72)}px;height:auto`,
       role: 'img',
       'aria-label': `Control flow graph for ${activeFn.function}`
     }, defs, edgesGroup, edgeLabelsGroup, nodesGroup);
 
     const svgWrap = el('div', { class: 'cfg-svg-scroll' }, svgElem);
+    // open centred on the entry block so the top of the flow is in view
+    requestAnimationFrame(() => {
+      const en = coords[entryId];
+      if (!en || !svgElem.isConnected) return;
+      const k = svgElem.getBoundingClientRect().width / svgW;
+      svgWrap.scrollLeft = Math.max(0, (en.x + en.w / 2) * k - svgWrap.clientWidth / 2);
+    });
 
     // 10. Legend
     const legend = el('div', { class: 'cfg-legend' },
       el('span', { class: 'cfg-leg-item' }, el('span', { class: 'cfg-leg-line true' }), 'True branch'),
       el('span', { class: 'cfg-leg-item' }, el('span', { class: 'cfg-leg-line false' }), 'False branch'),
       el('span', { class: 'cfg-leg-item' }, el('span', { class: 'cfg-leg-line jump' }), 'Jump / Switch'),
+      el('span', { class: 'cfg-leg-item' }, el('span', { class: 'cfg-leg-line back' }), 'Loop back'),
+      el('span', { class: 'cfg-leg-item' }, el('span', { class: 'cfg-leg-line unwind' }), 'Exception path'),
       el('span', { class: 'cfg-leg-item' }, el('span', { class: 'cfg-leg-box unreach' }), 'Unreachable block')
     );
 
@@ -1205,7 +1270,11 @@ function pageWorkspace(root) {
       );
     }
 
-    const graphPane = el('div', { class: 'cfg-graph-pane' },
+    const fullBar = s.cfgFull ? el('div', { class: 'cfg-full-bar' },
+      el('b', { text: `Control flow · ${activeFn.function}()` }),
+      el('button', { class: 'btn quiet', onClick: () => { s.cfgFull = false; renderResults(); } }, 'Close')) : null;
+    const graphPane = el('div', { class: 'cfg-graph-pane' + (s.cfgFull ? ' cfg-full' : ''), role: s.cfgFull ? 'dialog' : null, 'aria-label': s.cfgFull ? 'Control flow graph, expanded' : null },
+      fullBar,
       svgWrap,
       legend,
       warningLine
@@ -1227,6 +1296,14 @@ function pageWorkspace(root) {
           text: selBlock.reachable ? (selBlock.is_entry ? 'Entry' : 'Reachable') : 'Unreachable'
         })
       );
+
+      const ln = selBlock.lines || [];
+      const lineText = !ln.length ? 'No direct source line (added by the compiler)'
+        : ln.length === 1 ? 'Source line ' + ln[0]
+        : 'Source lines ' + ln[0] + '–' + ln[ln.length - 1];
+      const srcRow = el('div', { class: 'cfg-src-row' },
+        el('span', { class: 'muted', text: lineText }),
+        ln.length ? el('button', { class: 'linkish', onClick: () => ed.band(ln, { scroll: true }) }, 'Show in editor') : null);
 
       const navSection = el('div', { class: 'cfg-side-nav' });
       if (inList.length) {
@@ -1268,7 +1345,7 @@ function pageWorkspace(root) {
         )
       );
 
-      sidePane.append(head, navSection, instBox);
+      sidePane.append(head, srcRow, navSection, instBox);
     } else {
       sidePane.append(el('div', { class: 'empty' }, 'Click any block in the graph to view its instructions.'));
     }
