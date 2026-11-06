@@ -150,6 +150,11 @@ function renderEnergyChart(history, onClear) {
     )
   );
 
+  if (!history || history.length === 0) {
+    chartCard.append(el('p', { class: 'energy-empty muted', text: 'No runs recorded yet. Press Compile & Run to measure energy; each run adds a bar here.' }));
+    return chartCard;
+  }
+
   const wrap = el('div', { class: 'energy-chart-wrap' });
   const w = 620, h = 180;
   const padL = 60, padR = 25, padT = 25, padB = 35;
@@ -469,7 +474,7 @@ function pageWorkspace(root) {
 
   function renderResults() {
     const r = s.result;
-    if (s.tab !== 'cfg') { ed.band([]); s.cfgBandKey = null; }   // highlight belongs to the graph only
+    if (s.tab !== 'cfg' && s.tab !== 'ast') { ed.band([]); s.cfgBandKey = null; }   // highlight belongs to the graph only
     TABS.forEach(([id]) => {
       if (tabBtn[id]) {
         tabBtn[id].setAttribute('aria-selected', String(id === s.tab));
@@ -871,20 +876,98 @@ function pageWorkspace(root) {
     if (!roots.length) {
       return emptyState('Parser produced no tree', 'Check syntax or toolchain.');
     }
-    const treeObj = TreeView(roots);
-    return el('div', { class: 'ast-tab-host' },
-      el('div', { class: 'ast-tab-bar' },
-        el('span', { class: 'chip' }, el('b', { text: String(s.astData.node_count || treeObj.count) }), ' nodes'),
-        el('button', { class: 'btn quiet', onClick: () => { s.astData = null; s.astError = null; fetchAst(); } }, icon('sparkle'), ' Refresh')
-      ),
-      treeObj.root
-    );
+    // One graph per parse, kept across tab switches so pan, zoom and folds are not lost
+    if (!s.astGraph || s.astGraphFor !== s.astData) {
+      s.astGraph = ASTGraph(roots, {
+        orientation: 'lr', rootLabel: 'TranslationUnit', autoCollapseDepth: 2, minScale: 0.68,
+        onSelect: (n) => {
+          if (s.astSelHost) renderAstSel(s.astSelHost, n);
+          const lines = [];
+          if (n && n.line) { for (let i = n.line; i <= Math.min(n.endLine || n.line, n.line + 400); i++) lines.push(i); }
+          ed.band(lines, { scroll: true });
+        },
+      });
+      s.astGraphFor = s.astData;
+      s.astMode = s.astMode || 'graph';
+    }
+    const graph = s.astGraph;
+    const mode = s.astMode || 'graph';
+    const full = !!s.astFull;
+    if (!window.__astEsc) {
+      window.__astEsc = true;
+      document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && s.astFull) { s.astFull = false; renderResults(); } });
+    }
+
+    const setMode = (m) => { s.astMode = m; renderResults(); };
+    const seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'View' },
+      el('button', { 'aria-pressed': String(mode === 'graph'), onClick: () => setMode('graph') }, 'Graph'),
+      el('button', { 'aria-pressed': String(mode === 'list'), onClick: () => setMode('list') }, 'List'));
+    const controls = mode === 'graph' ? el('div', { class: 'seg zoom', role: 'group', 'aria-label': 'Zoom' },
+      el('button', { 'aria-label': 'Zoom out', title: 'Zoom out', onClick: () => graph.zoomOut() }, icon('minus')),
+      el('button', { title: 'Fit the tree in view', onClick: () => graph.fit(true) }, icon('fit'), ' Fit'),
+      el('button', { 'aria-label': 'Zoom in', title: 'Zoom in', onClick: () => graph.zoomIn() }, icon('plus'))) : null;
+    const foldBtns = mode === 'graph' ? [
+      el('button', { class: 'btn quiet', title: 'Open every branch', onClick: () => { graph.setAll(true); renderAstCount(); } }, 'Expand all'),
+      el('button', { class: 'btn quiet', title: 'Fold everything under the root', onClick: () => { graph.setAll(false); renderAstCount(); } }, 'Fold all'),
+    ] : [];
+    const expandBtn = el('button', { class: 'btn quiet', title: full ? 'Close (Esc)' : 'Open the tree large (Esc to close)',
+      onClick: () => { s.astFull = !full; renderResults(); } }, full ? 'Close' : 'Expand');
+    const count = el('span', { class: 'chip ast-count' });
+    function renderAstCount() {
+      count.replaceChildren(el('b', { text: String(mode === 'graph' ? graph.visibleCount() : graph.total) }),
+        mode === 'graph' ? ' of ' + graph.total + ' nodes' : ' nodes');
+    }
+    renderAstCount();
+
+    const bar = el('div', { class: 'ast-tab-bar' },
+      el('div', { class: 'ast-tab-left' }, seg, controls),
+      el('div', { class: 'ast-tab-right' }, count, ...foldBtns, expandBtn,
+        el('button', { class: 'btn quiet', onClick: () => { s.astData = null; s.astError = null; s.astGraph = null; ed.band([]); fetchAst(); } }, icon('sparkle'), ' Refresh')));
+
+    let stage;
+    if (mode === 'graph') {
+      stage = el('div', { class: 'ast-tab-stage' }, graph.root,
+        el('div', { class: 'ag-legend' }, ['decl', 'stmt', 'expr', 'lit'].map(k =>
+          el('span', { class: 'kind-chip k-' + k, title: AST_KINDS[k].hint }, el('i'), AST_KINDS[k].name))));
+    } else {
+      const list = TreeView(roots);
+      stage = el('div', { class: 'ast-tab-stage ast-list' }, list.root);
+    }
+
+    const selHost = el('div', { class: 'ast-sel', 'aria-live': 'polite' });
+    s.astSelHost = selHost;
+    renderAstSel(selHost, mode === 'graph' ? graph.selected : null);
+
+    const host = el('div', { class: 'ast-tab-host' + (full ? ' cfg-full' : ''), role: full ? 'dialog' : null, 'aria-label': full ? 'Syntax tree, expanded' : null },
+      full ? el('div', { class: 'cfg-full-bar' }, el('b', { text: 'Syntax tree' })) : null,
+      bar, stage, mode === 'graph' ? selHost : null);
+
+    if (mode === 'graph') {
+      const key = 'g' + (full ? 'f' : 'i');
+      if (s.astFitKey !== key) { s.astFitKey = key; requestAnimationFrame(() => requestAnimationFrame(() => graph.fit(true))); }
+    } else { s.astFitKey = null; }
+    return host;
+  }
+
+  /** Compact "selected node" strip under the graph. */
+  function renderAstSel(host, n) {
+    if (!n) {
+      host.replaceChildren(el('span', { class: 'muted', text: 'Click a node to see where it is in your code. Double-click to fold or unfold a branch.' }));
+      return;
+    }
+    const k = AST_KINDS[n.kind] || AST_KINDS.other;
+    const where = n.line ? 'line ' + n.line + (n.endLine && n.endLine !== n.line ? '–' + n.endLine : '') : null;
+    host.replaceChildren(
+      el('span', { class: 'kind-chip k-' + n.kind }, el('i'), el('b', { class: 'mono', text: n.type })),
+      n.details ? el('span', { class: 'ast-sel-detail mono', text: n.details }) : null,
+      el('span', { class: 'ast-sel-meta muted' }, [where, n.children.length ? plural(n.size - 1, 'node') + ' below' : 'leaf', k.name.toLowerCase()].filter(Boolean).join(' · ')));
   }
 
   async function fetchAst() {
     if (s.astLoading) return;
     s.astLoading = true;
     s.astError = null;
+    s.astGraph = null;
     renderResults();
     try {
       const d = await call('/api/cpp/ast', { code: s.code, language: s.language });
@@ -1476,7 +1559,10 @@ function pageWorkspace(root) {
         editorWrap, stdinBox,
         el('div', { class: 'panel-foot' },
           el('span', { class: 'foot-left' }, cursorInfo, staleChip),
-          el('span', { text: 'Ctrl+Enter run · Ctrl+Shift+Enter compile only · Esc then Tab leaves the editor' }))),
+          el('span', { class: 'hints' },
+            el('span', null, el('kbd', { text: 'Ctrl' }), el('kbd', { text: '↵' }), ' run'),
+            el('span', null, el('kbd', { text: 'Ctrl' }), el('kbd', { text: 'Shift' }), el('kbd', { text: '↵' }), ' compile only'),
+            el('span', null, el('kbd', { text: 'Esc' }), ' then ', el('kbd', { text: 'Tab' }), ' leaves the editor')))),
       el('section', { class: 'panel results', 'aria-label': 'Results' }, tabList, panel)));
   renderResults(); updateStale(); updateInputHint();
   if (s.result) markEditor(s.result);

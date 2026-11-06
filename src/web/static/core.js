@@ -40,7 +40,17 @@ function svg(tag, attrs, ...kids) {
   return n;
 }
 
-function announce(msg) { const l = $('#live'); if (l) { l.textContent = ''; setTimeout(() => { l.textContent = msg; }, 30); } }
+/** A small, self-dismissing confirmation. Screen readers already hear the message through the live region. */
+function toast(msg) {
+  if (!msg) return;
+  let host = document.getElementById('toasts');
+  if (!host) { host = el('div', { id: 'toasts', class: 'toasts', 'aria-hidden': 'true' }); document.body.append(host); }
+  const t = el('div', { class: 'toast', text: String(msg) });
+  host.append(t);
+  while (host.children.length > 3) host.firstChild.remove();
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 260); }, 2600);
+}
+function announce(msg) { toast(msg); const l = $('#live'); if (l) { l.textContent = ''; setTimeout(() => { l.textContent = msg; }, 30); } }
 
 /* ── API ─────────────────────────────────────────────────────────────── */
 let _busyCount = 0;
@@ -198,7 +208,8 @@ function Editor({ value = '', label, language = 'cpp', onChange, onRun, onCursor
     autocomplete: 'off', autocorrect: 'off', 'aria-label': label,
   });
   ta.value = value;
-  const bandInner = el('div', { class: 'band-inner' });
+  const curEl = el('div', { class: 'cur-line' });
+  const bandInner = el('div', { class: 'band-inner' }, curEl);
   const bandLayer = el('div', { class: 'band-layer', 'aria-hidden': 'true' }, bandInner);
   const codeWrap = el('div', { class: 'code-wrap' }, bandLayer, highlightPre, ta);
   const root = el('div', { class: 'editor' }, gutter, codeWrap);
@@ -210,14 +221,17 @@ function Editor({ value = '', label, language = 'cpp', onChange, onRun, onCursor
   let curLine = 1;
   const LINE_H = 20;
   const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function placeCur() { curEl.style.top = ((curLine - 1) * LINE_H) + 'px'; }
   function markCur() {
+    placeCur();
     gutter.querySelectorAll('.cur').forEach(x => x.classList.remove('cur'));
     const sp = gutter.children[curLine - 1];
     if (sp) sp.classList.add('cur');
   }
   function syncBand() { bandInner.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`; }
   function paintBand() {
-    bandInner.replaceChildren(...[...band].map(n => el('div', { class: 'band-line', style: `top:${(n - 1) * LINE_H}px` })));
+    bandInner.replaceChildren(curEl, ...[...band].map(n => el('div', { class: 'band-line', style: `top:${(n - 1) * LINE_H}px` })));
+    placeCur();
     syncBand();
   }
   function paintGutter() {

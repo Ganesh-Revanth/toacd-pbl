@@ -79,12 +79,19 @@ function astLayout(root, orient, levelGap = AG.GAP_D + 20) {
 }
 
 function astEdgePath(a, b, orient) {
+  const R = 10;
   if (orient === 'td') {
-    const x1 = a.x + a.w / 2, y1 = a.y + AG.H, x2 = b.x + b.w / 2, y2 = b.y, my = (y1 + y2) / 2;
-    return `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
+    const x1 = a.x + a.w / 2, y1 = a.y + AG.H, x2 = b.x + b.w / 2, y2 = b.y, my = y1 + (y2 - y1) / 2;
+    const dx = x2 - x1;
+    if (Math.abs(dx) < 1) return `M${x1},${y1} V${y2}`;
+    const r = Math.min(R, Math.abs(dx) / 2, (y2 - y1) / 2), sg = dx > 0 ? 1 : -1;
+    return `M${x1},${y1} V${my - r} Q${x1},${my} ${x1 + sg * r},${my} H${x2 - sg * r} Q${x2},${my} ${x2},${my + r} V${y2}`;
   }
-  const x1 = a.x + a.w, y1 = a.y + AG.H / 2, x2 = b.x, y2 = b.y + AG.H / 2, mx = (x1 + x2) / 2;
-  return `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+  const x1 = a.x + a.w, y1 = a.y + AG.H / 2, x2 = b.x, y2 = b.y + AG.H / 2, mx = x1 + (x2 - x1) / 2;
+  const dy = y2 - y1;
+  if (Math.abs(dy) < 1) return `M${x1},${y1} H${x2}`;
+  const r = Math.min(R, Math.abs(dy) / 2, (x2 - x1) / 2), sg = dy > 0 ? 1 : -1;
+  return `M${x1},${y1} H${mx - r} Q${mx},${y1} ${mx},${y1 + sg * r} V${y2 - sg * r} Q${mx},${y2} ${mx + r},${y2} H${x2}`;
 }
 
 /* ── The viewer ──────────────────────────────────────────────────────── */
@@ -102,7 +109,7 @@ function ASTGraph(roots, opts = {}) {
   const hasRoles = all.some(n => n.role);
 
   // Big trees start partly collapsed so the first view is readable.
-  const limit = opts.autoCollapseDepth ?? (total > 160 ? 4 : total > 80 ? 6 : Infinity);
+  const limit = opts.autoCollapseDepth ?? (total > 40 ? 3 : Infinity);
   astEach(model, n => { n.collapsed = n.children.length > 0 && astPath(n).length - 1 >= limit; });
 
   let orient = opts.orientation || 'td';
@@ -123,14 +130,15 @@ function ASTGraph(roots, opts = {}) {
   function fit(readable = false) {
     if (!layout) return;
     const { w, h } = size();
-    const fitK = Math.min((w - 2 * AG.PAD) / layout.width, (h - 2 * AG.PAD) / layout.height, 1.15);
-    const k = readable ? Math.max(fitK, 0.6) : fitK;
+    const lw = layout.width + (orient === 'lr' ? 30 : 0);          // room for the +N fold badge
+    const fitK = Math.min((w - 2 * AG.PAD) / lw, (h - 2 * AG.PAD) / layout.height, 1.15);
+    const k = readable ? Math.max(fitK, opts.minScale ?? 0.8) : fitK;
     view.k = Math.max(0.1, k);
     if (readable && k > fitK + 0.001) {
       view.x = AG.PAD;                                              // too big to fit: anchor at the root
       view.y = orient === 'td' ? AG.PAD : Math.max(AG.PAD * 0.5, h / 2 - (model.y + AG.H / 2) * view.k);
     } else {
-      view.x = (w - layout.width * view.k) / 2;
+      view.x = (w - lw * view.k) / 2;
       view.y = Math.max(AG.PAD * 0.6, (h - layout.height * view.k) / 2);
     }
     apply();
@@ -152,6 +160,7 @@ function ASTGraph(roots, opts = {}) {
     // Edge labels need room between columns, or they collide with the fold buttons.
     layout = astLayout(model, orient, showRoles && hasRoles ? 124 : undefined);
     const onPath = pathSet(), searching = !!query;
+    canvas.classList.toggle('has-sel', !!selected);
     gEdges.replaceChildren(); gLabels.replaceChildren(); gNodes.replaceChildren();
 
     layout.edges.forEach(({ from, to }) => {

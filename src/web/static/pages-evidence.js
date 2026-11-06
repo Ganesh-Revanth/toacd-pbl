@@ -6,17 +6,37 @@ function KPICard(label, num, unit) {
   return el('div', { class: 'kpi-card' },
     el('div', { class: 'kpi-label', text: label }),
     el('div', { class: 'kpi-num' },
-      el('span', { class: 'bench-num', text: String(num) }),
+      (() => { const n = el('span', { class: 'bench-num', text: String(num) }); countUp(n, num); return n; })(),
       unit ? el('span', { class: 'kpi-unit faint', text: ' ' + unit }) : null
     )
   );
 }
 
 function Bar(label, value, count, total, cls) {
+  // grows from empty to its value once on screen (instant for reduced motion)
+  const fill = el('div', { class: 'bar-fill ' + (cls || ''), style: 'width:0%' });
+  const set = () => { fill.style.width = (value || 0) + '%'; };
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) set();
+  else requestAnimationFrame(() => requestAnimationFrame(set));
   return el('div', { class: 'bar-row' },
     el('span', { text: label }),
-    el('div', { class: 'bar-track', role: 'img', 'aria-label': label + ': ' + pct(value) }, el('div', { class: 'bar-fill ' + (cls || ''), style: 'width:' + (value || 0) + '%' })),
+    el('div', { class: 'bar-track', role: 'img', 'aria-label': label + ': ' + pct(value) }, fill),
     el('span', { class: 'bar-val', text: pct(value) }));
+}
+
+/** Count a figure up from zero. Falls back to the final text for reduced motion or non-numeric values. */
+function countUp(node, final) {
+  const target = parseFloat(final);
+  if (!isFinite(target) || (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) return;
+  const decimals = (String(final).split('.')[1] || '').length;
+  const t0 = performance.now(), dur = 700;
+  const tick = (now) => {
+    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    node.textContent = (target * e).toFixed(decimals);
+    if (k < 1) requestAnimationFrame(tick); else node.textContent = String(final);
+  };
+  node.textContent = (0).toFixed(decimals);
+  requestAnimationFrame(tick);
 }
 
 const mark = (v) => v === 'yes'
@@ -27,26 +47,35 @@ const mark = (v) => v === 'yes'
 
 async function pageBenchmark(root) {
   root.append(el('div', { class: 'page-head' }, el('div', null, el('h1', { text: 'Benchmark' }),
-    el('p', { text: 'Measured results from results/final.csv across 40 multi-language fixtures (C++, C, Python, Java). Every figure here is recomputed from the raw rows when the page loads.' }))));
+    el('p', { class: 'bm-sub', text: 'Measured results from results/final.csv across the multi-language fixtures (C++, C, Python, Java). Every figure here is recomputed from the raw rows when the page loads.' }))));
   const host = el('div'); root.append(host);
+  host.append(el('div', { class: 'kpi-grid', 'aria-hidden': 'true' }, [0, 1, 2, 3].map(() => el('div', { class: 'kpi-card skeleton' }))));
   let b;
-  try { b = await call('/api/benchmark'); } catch (e) { host.append(notice('bad', e.message)); return; }
+  try { b = await call('/api/benchmark'); } catch (e) { host.replaceChildren(notice('bad', e.message)); return; }
+  host.replaceChildren();
   const h = b.healing;
   const byLang = b.by_language || {};
+  // Rule-based repair only applies to C/C++, so its rate is measured on those files alone
+  const ruleLangs = Object.values(byLang).filter(l => l.has_rules);
+  const ruleBroken = ruleLangs.reduce((a, l) => a + l.broken, 0);
+  const ruleFixed = ruleLangs.reduce((a, l) => a + l.rule_fixed, 0);
+  const ruleRate = ruleBroken ? (ruleFixed * 100 / ruleBroken) : null;
+  const sub = root.querySelector('.bm-sub');
+  if (sub) sub.textContent = 'Measured results from results/final.csv across ' + h.total_fixtures + ' multi-language fixtures (C++, C, Python, Java). Every figure here is recomputed from the raw rows when the page loads.';
 
   const kpis = el('div', { class: 'kpi-grid' },
     KPICard('Gemini agent repair', h.ai_rate != null ? h.ai_rate.toFixed(1) : '—', '%'),
-    KPICard('Rule-based repair (C/C++)', '75.0', '%'),
+    KPICard('Rule-based repair (C/C++)', ruleRate != null ? ruleRate.toFixed(1) : '—', '%'),
     KPICard('Total test fixtures', h.total_fixtures, 'files'),
     KPICard('Diagnostic accuracy', h.classifier_accuracy != null ? h.classifier_accuracy.toFixed(1) : '—', '%')
   );
 
   host.append(
     kpis,
-    el('p', { class: 'lede', text: 'Of ' + h.broken + ' broken files requiring repair across 4 languages, the Gemini agent fixed ' + h.ai_fixed + ' (' + (h.ai_rate != null ? h.ai_rate.toFixed(1) : '—') + '%). Rule-based healing resolved ' + h.rule_fixed + ' of 16 broken C++ and C files (75.0%).' }),
+    el('p', { class: 'lede', text: 'Of ' + h.broken + ' broken files requiring repair across 4 languages, the Gemini agent fixed ' + h.ai_fixed + ' (' + (h.ai_rate != null ? h.ai_rate.toFixed(1) : '—') + '%). Rule-based healing resolved ' + ruleFixed + ' of ' + ruleBroken + ' broken C++ and C files (' + (ruleRate != null ? ruleRate.toFixed(1) : '—') + '%).' }),
     el('div', { class: 'bars' },
       Bar('Autonomous Gemini agent (All 4 Languages)', h.ai_rate, h.ai_fixed, h.ai_ran, 'ai'),
-      Bar('Rule-based healer (C++ & C only)', 75.0, h.rule_fixed, 16)),
+      Bar('Rule-based healer (C++ & C only)', ruleRate, ruleFixed, ruleBroken)),
     el('p', { class: 'faint', style: 'max-width:70ch', text: 'Averages: ' + (h.rule_avg_s ?? '—') + 's per file for rules (C++/C), ' + (h.ai_avg_s ?? '—') + 's for the Gemini agent. ' + h.note }),
     el('p', { class: 'faint', style: 'max-width:70ch;margin-top:6px', text: h.already_clean + ' of ' + h.total_fixtures + ' fixtures were baseline clean (compiling with 0 errors initially) and are left out of repair rates. Diagnostic accuracy averaged ' + pct(h.classifier_accuracy) + ' across all languages.' }));
 
@@ -201,7 +230,7 @@ const AFTER = {
     N('llm', 612, 236, 200, 60, 'LLM client', 'cache · retry · mock mode', true),
     N('qt', 24, 360, 220, 60, 'PyQt6 desktop app', 'compiler, healing, AST, graph'),
     N('web', 270, 360, 220, 60, 'Code Studio', 'Multi-lang studio · diffs · benchmark', true),
-    N('bm', 516, 360, 250, 60, 'Benchmark harness', '40 fixtures (C++, C, Python, Java)', true),
+    N('bm', 516, 360, 250, 60, 'Benchmark harness', 'multi-language fixtures (C++, C, Python, Java)', true),
     N('csv', 792, 360, 244, 60, 'results/final.csv', 'per-language numbers & evidence', true),
   ],
   edges: [
@@ -227,7 +256,7 @@ function pageArchitecture(root) {
         v === 'after' ? el('span', null, el('i', { class: 'dash' }), 'Dashed line = AI traffic or verification') : null),
       el('p', { class: 'muted', style: 'margin-top:16px;max-width:72ch', text: v === 'before'
         ? 'The original tool wrapped g++: it parsed compiler messages, classified them, explained them and applied hand-written repair rules.'
-        : 'The improved architecture supports 4 languages: C++, C, Python, and Java. C++ and C feature Machine Learning diagnostic classification (Scikit-Learn SGDClassifier on 67k GCC rows) and rule-based heuristic healing (auto_healer.py). Python and Java use deterministic keyword categories from compiler diagnostics and autonomous Gemini agent healing only. Every AI call is protected by a security guardrail, all proposed patches require user approval via diff review before applying, and the system is verified by a 40-fixture benchmark harness across desktop PyQt and web studio interfaces.' }),
+        : 'The improved architecture supports 4 languages: C++, C, Python, and Java. C++ and C feature Machine Learning diagnostic classification (Scikit-Learn SGDClassifier on 67k GCC rows) and rule-based heuristic healing (auto_healer.py). Python and Java use deterministic keyword categories from compiler diagnostics and autonomous Gemini agent healing only. Every AI call is protected by a security guardrail, all proposed patches require user approval via diff review before applying, and the system is verified by a multi-language fixture benchmark harness across desktop PyQt and web studio interfaces.' }),
 
       // ── Section 1: Threat Model ──────────────────────────────────────────
       el('div', { class: 'sec-card', style: 'margin-top:24px' },
